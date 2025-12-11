@@ -42,7 +42,7 @@ TO_EMAILS = [
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Instant Bot (Auto-Stop)", layout="wide")
+st.set_page_config(page_title="Nifty Master Bot", layout="wide")
 
 # ---------------------------
 # ANGEL LOGIN
@@ -216,25 +216,15 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
         return pd.DataFrame()
 
 def inject_live_ltp(df, api_obj, token, exchange="NSE"):
-    """
-    Injects LTP only if market is OPEN.
-    If market is closed (> 15:30), it returns original DF to avoid ghost candles.
-    """
     if df.empty: return df
     
     now_ist = datetime.now(IST)
+    if now_ist.time() >= dtime(15, 30): return df 
     
-    # 🛑 MARKET HOURS CHECK 🛑
-    # If it is past 3:30 PM, DO NOT inject live data.
-    if now_ist.time() >= dtime(15, 30):
-        return df 
-    
-    # --- Proceed with Injection if Market Open ---
     ltp = fetch_ltp(api_obj, token, exchange)
     if ltp is None: return df 
     
     last_dt = df.iloc[-1]["datetime"].replace(tzinfo=None)
-    
     now_naive = now_ist.replace(microsecond=0, tzinfo=None)
     
     minute_block = (now_naive.minute // 10) * 10
@@ -247,15 +237,13 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
         
     elif last_dt < current_candle_start:
         new_row = pd.DataFrame([{
-            "datetime": current_candle_start,
-            "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0
+            "datetime": current_candle_start, "open": ltp, "high": ltp, "low": ltp, "close": ltp, "volume": 0
         }])
         df = pd.concat([df, new_row], ignore_index=True)
-        
     return df
 
 # ---------------------------
-# INDICATORS (EMA 3 / Offset 2)
+# INDICATORS
 # ---------------------------
 def add_custom_ema(df):
     df = df.copy()
@@ -277,7 +265,6 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
             
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
-        # ONLY INJECT IF TODAY AND MARKET IS OPEN
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
             
@@ -296,7 +283,6 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         
         if not (MIN_OPT_PRICE <= entry_price <= MAX_OPT_PRICE): continue
         if not row["alert_candle"]: continue
-        
         if idx + 1 >= len(df_opt_today): continue 
             
         if df_opt_today.iloc[idx + 1]["high"] > entry_price:
@@ -310,9 +296,6 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         return True, best["strike"], best["df"]
     return False, None, None
 
-# ---------------------------
-# TRADES LOGIC
-# ---------------------------
 def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date):
     trades = []
     trade_open = False
@@ -325,10 +308,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
         if trade_count >= 2: break
         curr_time = df.loc[idx, "datetime"]
 
-        # ---------------- ENTRY ----------------
         if not trade_open and df.loc[idx, "alert_candle"]:
-            
-            # PE
             if df.loc[idx, "above_ema_alert"]:
                 if last_trade_type != "PE":
                     if df.loc[idx + 1, "low"] < df.loc[idx, "low"]:
@@ -343,15 +323,12 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             final_sl = opt_alert_row["low"]
                             risk = opt_entry_price - final_sl
                             opt_target_price = opt_entry_price + (3 * risk)
-                            
                             trade_entry = {
                                 "TradeID": trade_count + 1, "Nature": "BUY PE", "Signal Time": curr_time.strftime('%H:%M'), 
                                 "Signal Close": df.loc[idx, "close"], "type": "PE", "entry_time": df.loc[idx + 1, "datetime"],
                                 "entry_price": opt_entry_price, "SL": round(final_sl, 2), "target": round(opt_target_price, 2),
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
                             }
-
-            # CE
             elif df.loc[idx, "below_ema_alert"]:
                 if last_trade_type != "CE":
                     if df.loc[idx + 1, "high"] > df.loc[idx, "high"]:
@@ -366,7 +343,6 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             final_sl = opt_alert_row["low"]
                             risk = opt_entry_price - final_sl
                             opt_target_price = opt_entry_price + (3 * risk)
-                            
                             trade_entry = {
                                 "TradeID": trade_count + 1, "Nature": "BUY CE", "Signal Time": curr_time.strftime('%H:%M'),
                                 "Signal Close": df.loc[idx, "close"], "type": "CE", "entry_time": df.loc[idx + 1, "datetime"],
@@ -374,33 +350,26 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
                             }
 
-        # ---------------- EXIT ----------------
         elif trade_open and active_opt_df is not None:
             opt_rows = active_opt_df[active_opt_df["datetime"] == curr_time]
             if not opt_rows.empty:
                 opt_row = opt_rows.iloc[0]
-                
-                # TARGET HIT
                 if opt_row["high"] >= trade_entry["target"]:
                     trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["target"], "result": "TARGET 🟢", "Target Time": curr_time.strftime('%H:%M')})
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
                     break 
-                    
-                # SL HIT
                 elif opt_row["low"] <= trade_entry["SL"]:
                     trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["SL"], "result": "SL 🔴", "SL Time": curr_time.strftime('%H:%M')})
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
     
-    if trade_open and trade_entry:
-        trades.append(trade_entry)
-
+    if trade_open and trade_entry: trades.append(trade_entry)
     return trades
 
-def plot_strategy_with_trades(df, trades=None, title="Chart"):
+def plot_strategy_with_trades(df, trades=None, title="Chart", extra_lines=None, is_option_chart=False):
     fig = go.Figure(data=[go.Candlestick(x=df["datetime"], open=df["open"], high=df["high"], low=df["low"], close=df["close"], name="Candles")])
     fig.add_trace(go.Scatter(x=df["datetime"], y=df["ema_3_smooth"], mode="lines", line=dict(color='yellow', width=1), name="EMA 3 (Offset 2)"))
     
@@ -411,13 +380,22 @@ def plot_strategy_with_trades(df, trades=None, title="Chart"):
             
     if trades:
         for tr in trades:
-            dt_obj = datetime.strptime(f"{df['datetime'].iloc[0].date()} {tr['Signal Time']}", "%Y-%m-%d %H:%M")
-            fig.add_trace(go.Scatter(x=[dt_obj], y=[tr["Signal Close"]], mode="markers", marker=dict(size=12, color="blue", symbol="triangle-down"), name="Signal"))
+            if not is_option_chart:
+                sig_time_str = tr['Signal Time']
+                sig_row = df[df['datetime'].dt.strftime('%H:%M') == sig_time_str]
+                if not sig_row.empty:
+                    fig.add_trace(go.Scatter(x=[sig_row.iloc[0]['datetime']], y=[tr["Signal Close"]], mode="markers", marker=dict(size=12, color="blue", symbol="triangle-down"), name="Signal"))
             
-            entry_t = tr["entry_time"]
-            entry_row = df[df["datetime"] == entry_t]
-            if not entry_row.empty:
-                fig.add_trace(go.Scatter(x=[entry_t], y=[entry_row.iloc[0]["open"]], mode="markers+text", marker=dict(size=10, color="orange"), text=[f"{tr['type']} Entry"], textposition="bottom right", name="Entry"))
+            entry_t = tr.get("entry_time")
+            if entry_t:
+                entry_row = df[df["datetime"] == entry_t]
+                if not entry_row.empty:
+                    fig.add_trace(go.Scatter(x=[entry_t], y=[entry_row.iloc[0]["open"]], mode="markers+text", marker=dict(size=10, color="orange"), text=[f"{tr['type']} Entry"], textposition="bottom right", name="Entry"))
+
+    if extra_lines:
+        if extra_lines.get("entry"): fig.add_hline(y=extra_lines["entry"], line_dash="dash", line_color="blue", annotation_text="ENTRY")
+        if extra_lines.get("sl"): fig.add_hline(y=extra_lines["sl"], line_dash="solid", line_color="red", annotation_text="SL")
+        if extra_lines.get("target"): fig.add_hline(y=extra_lines["target"], line_dash="solid", line_color="green", annotation_text="TARGET")
 
     fig.update_layout(title=title, template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
     return fig
@@ -443,14 +421,12 @@ with st.sidebar:
             st.success("Sent!")
         else: st.error("Failed")
 
-st.title("🚀 Nifty Auto-Strategy (Auto-Stop)")
+st.title("🚀 Nifty Master Bot (Sequential)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
+analyzer_section = st.empty()
 
-# ----------------------------------------------------
-# SMART STATE TRACKING
-# ----------------------------------------------------
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
 
@@ -485,20 +461,59 @@ def run_analysis_cycle():
     
     trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date)
     
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}"), use_container_width=True)
+    # 1. Main Spot Chart (Always Visible)
+    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
     
     if trades:
         df_display = pd.DataFrame(trades)
         styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
         main_table.dataframe(styler, use_container_width=True)
         
+        # ----------------------------------
+        # 🔎 SEQUENTIAL OPTION CHARTS (BACKTEST ONLY)
+        # ----------------------------------
+        if mode == "🔙 BACKTEST":
+            with analyzer_section.container():
+                st.divider()
+                st.subheader("🔎 Trade Analysis (All Trades)")
+                
+                # LOOP THROUGH ALL TRADES AND DISPLAY CHARTS
+                for t_data in trades:
+                    strike = t_data['Best Strike']
+                    op_type = "CE" if "CE" in t_data['Nature'] else "PE"
+                    
+                    st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
+                    
+                    token = get_token_from_master_cached(master_df, "NIFTY", expiry_str, strike, op_type)
+                    if token:
+                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=5)
+                        if not df_opt_chart.empty:
+                            df_opt_chart = add_custom_ema(df_opt_chart)
+                            df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
+                            lines = {"entry": t_data['entry_price'], "sl": t_data['SL'], "target": t_data['target']}
+                            
+                            fig_opt = plot_strategy_with_trades(
+                                df_opt_today_chart, 
+                                trades=[t_data], 
+                                title=f"OPTION: {strike} {op_type} ({t_data['result']})", 
+                                extra_lines=lines,
+                                is_option_chart=True 
+                            )
+                            st.plotly_chart(fig_opt, use_container_width=True)
+                        else: st.error(f"No Data for {strike} {op_type}")
+                    else: st.error(f"Token Not Found for {strike} {op_type}")
+                    st.divider()
+
+        # ----------------------------------
+        # LIVE NOTIFICATIONS
+        # ----------------------------------
         if mode == "🔴 LIVE MARKET":
+            analyzer_section.empty()
             for trade in trades:
                 tid = trade["TradeID"]
                 current_result = trade["result"]
                 signal_time_str = trade["Signal Time"]
                 last_known_state = st.session_state["trade_state"].get(tid, None)
-                
                 is_fresh_event = is_recent(signal_time_str, limit_minutes=15)
 
                 if last_known_state is None:
@@ -526,10 +541,15 @@ def run_analysis_cycle():
     top_status.caption(f"Last Scan: {datetime.now(IST).strftime('%H:%M:%S')}")
 
 if mode == "🔙 BACKTEST":
+    if "backtest_data" not in st.session_state:
+        st.session_state["backtest_data"] = None
+
     if st.button("Run Backtest"):
         with st.spinner("Analyzing..."):
             run_analysis_cycle()
-            
+            # Mark that we ran it so charts persist if we add interactivity later
+            st.session_state["backtest_data"] = True
+
 elif mode == "🔴 LIVE MARKET":
     if st.button("▶️ START AUTO-TRADING"):
         st.success("Live Mode Started! Auto-refreshing...")
