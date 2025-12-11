@@ -7,44 +7,42 @@ import requests
 import os
 import pyotp
 import time
-import pytz  # <--- NEW IMPORT
+import pytz
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ---------------------------
-# TIMEZONE SETUP (CRITICAL FIX)
+# TIMEZONE SETUP
 # ---------------------------
 IST = pytz.timezone("Asia/Kolkata")
 
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-# ⚠️ SECURITY WARNING: Ideally, store these in st.secrets in Streamlit Cloud.
 API_KEY = "WM6i3ikL"
 CLIENT_ID = "AABY364105"
 PIN = "6954"
 TOTP_TOKEN = "D5PMGU3B674K4YFIQNE7CKDUSU"
-NIFTY_TOKEN = "99926000"  # Angel One NSE Nifty Spot Token
+NIFTY_TOKEN = "99926000"
 
 # STRATEGY SETTINGS
-MIN_OPT_PRICE = 150   # Minimum Option Price to Enter
-MAX_OPT_PRICE = 190   # Maximum Option Price to Enter
+MIN_OPT_PRICE = 150
+MAX_OPT_PRICE = 190
 
 # ---------------------------
 # EMAIL CONFIGURATION
 # ---------------------------
 GMAIL_USER = "akhils8493@gmail.com"      
-GMAIL_PASSWORD = "tptr wtof dhkb jtht"
+GMAIL_PASSWORD = "tptr wtof dhkb jtht" 
 
-# LIST OF RECEIVERS
 TO_EMAILS = [
     "akhils8493@gmail.com", 
     "shauryamraghaw@gmail.com",
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Instant Bot", layout="wide")
+st.set_page_config(page_title="Nifty Instant Bot (Stop on Target)", layout="wide")
 
 # ---------------------------
 # ANGEL LOGIN
@@ -68,7 +66,7 @@ def angel_login():
 # ---------------------------
 def get_next_tuesday(date=None):
     if date is None:
-        date = datetime.now(IST).date() # FIX: Use IST
+        date = datetime.now(IST).date()
     elif isinstance(date, pd.Timestamp):
         date = date.date()
     days_ahead = (1 - date.weekday()) % 7
@@ -162,7 +160,7 @@ def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_
         return None
 
 # ---------------------------
-# DATA FETCHING (WARM-UP + TIMEZONE FIX)
+# DATA FETCHING
 # ---------------------------
 def fetch_ltp(api_obj, token, exchange="NSE"):
     try:
@@ -175,19 +173,15 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
 
 def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=5):
     try:
-        # --- FIX: Force IST Timezone ---
         now_ist = datetime.now(IST)
         target_date = specific_date if specific_date else now_ist.date()
 
-        # Determine End Time
         if target_date == now_ist.date():
             to_dt = now_ist
         else:
-            # For backtesting past dates, set end time to 15:30 IST
             to_dt = datetime.combine(target_date, dtime(15, 30))
-            to_dt = IST.localize(to_dt) # Make aware
+            to_dt = IST.localize(to_dt)
 
-        # Determine Start Time (Go back 'days_back' days)
         from_dt = to_dt - timedelta(days=days_back)
         from_dt = from_dt.replace(hour=9, minute=15)
 
@@ -195,7 +189,6 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
             "exchange": exchange, 
             "symboltoken": str(token), 
             "interval": interval,
-            # .strftime converts the time to string. Since `from_dt` is IST, the string will be correct IST time.
             "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), 
             "todate": to_dt.strftime("%Y-%m-%d %H:%M")
         }
@@ -209,11 +202,7 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
                     cols = ["datetime", "open", "high", "low", "close", "volume"]
                     df = pd.DataFrame(data, columns=cols)
                     
-                    # FIX TIMEZONE: Angel returns strings like "2023-10-27 09:15" (IST logic)
-                    # Convert to datetime objects, assume they are naive (local) time
                     df["datetime"] = pd.to_datetime(df["datetime"])
-                    
-                    # Ensure no timezone info is attached to keep calculations simple
                     if df["datetime"].dt.tz is not None:
                         df["datetime"] = df["datetime"].dt.tz_localize(None)
                     
@@ -234,9 +223,7 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
     
     last_dt = df.iloc[-1]["datetime"].replace(tzinfo=None)
     
-    # --- FIX: Calculate current candle time using IST ---
     now_ist = datetime.now(IST).replace(microsecond=0)
-    # Convert to naive for dataframe compatibility
     now_naive = now_ist.replace(tzinfo=None)
     
     minute_block = (now_naive.minute // 10) * 10
@@ -261,13 +248,8 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
 # ---------------------------
 def add_custom_ema(df):
     df = df.copy()
-    
-    # EMA 3
     df["ema_3_base"] = df["close"].ewm(span=3, adjust=False).mean()
-    
-    # Offset 2 (Shift Forward)
     df["ema_3_smooth"] = df["ema_3_base"].shift(2)
-
     df["above_ema_alert"] = df["low"] > df["ema_3_smooth"] 
     df["below_ema_alert"] = df["high"] < df["ema_3_smooth"] 
     df["alert_candle"] = df["above_ema_alert"] | df["below_ema_alert"]
@@ -282,19 +264,14 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         token = get_token_from_master_cached(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
-        # FETCH 5 DAYS HISTORY FOR OPTIONS TOO
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
-        # Check if trade_date is TODAY (IST)
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
             
         if df_opt.empty: continue
-        
-        # Calculate Indicator on Long Data
         df_opt = add_custom_ema(df_opt)
         
-        # Slice to Today for Validation
         df_opt_today = df_opt[df_opt["datetime"].dt.date == trade_date].copy()
         df_opt_today = df_opt_today.reset_index(drop=True)
         
@@ -308,9 +285,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         if not (MIN_OPT_PRICE <= entry_price <= MAX_OPT_PRICE): continue
         if not row["alert_candle"]: continue
         
-        # --- FIX: CHECK IF NEXT CANDLE EXISTS ---
         if idx + 1 >= len(df_opt_today): continue 
-        # ----------------------------------------
             
         if df_opt_today.iloc[idx + 1]["high"] > entry_price:
             candidates.append({
@@ -323,6 +298,9 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         return True, best["strike"], best["df"]
     return False, None, None
 
+# ---------------------------
+# TRADES LOGIC (STOP ON TARGET)
+# ---------------------------
 def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date):
     trades = []
     trade_open = False
@@ -330,8 +308,6 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
     trade_count = 0
     last_trade_type = None 
     active_opt_df = None 
-    
-    # We iterate through the sliced "Today" dataframe
     
     for idx in range(len(df) - 1):
         if trade_count >= 2: break
@@ -392,19 +368,24 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
             if not opt_rows.empty:
                 opt_row = opt_rows.iloc[0]
                 
-                # Exit
+                # TARGET HIT
                 if opt_row["high"] >= trade_entry["target"]:
                     trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["target"], "result": "TARGET 🟢", "Target Time": curr_time.strftime('%H:%M')})
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
+                    
+                    # 🛑 STOP TRADING FOR THE DAY ON TARGET 🛑
+                    break 
+                    
+                # SL HIT
                 elif opt_row["low"] <= trade_entry["SL"]:
                     trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["SL"], "result": "SL 🔴", "SL Time": curr_time.strftime('%H:%M')})
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
+                    # Note: We do NOT break here. We allow Trade 2 if SL was hit.
     
-    # Handle still open trade
     if trade_open and trade_entry:
         trades.append(trade_entry)
 
@@ -421,11 +402,9 @@ def plot_strategy_with_trades(df, trades=None, title="Chart"):
             
     if trades:
         for tr in trades:
-            # 1. Plot Signal Marker
             dt_obj = datetime.strptime(f"{df['datetime'].iloc[0].date()} {tr['Signal Time']}", "%Y-%m-%d %H:%M")
             fig.add_trace(go.Scatter(x=[dt_obj], y=[tr["Signal Close"]], mode="markers", marker=dict(size=12, color="blue", symbol="triangle-down"), name="Signal"))
             
-            # 2. Plot Entry Marker (Orange Dot)
             entry_t = tr["entry_time"]
             entry_row = df[df["datetime"] == entry_t]
             if not entry_row.empty:
@@ -443,15 +422,9 @@ master_df = get_scrip_master_df()
 
 with st.sidebar:
     st.header("⚙️ Controls")
-    
-    # FIX: Default to IST date
     today_ist = datetime.now(IST).date()
-    
     mode = st.radio("Select Mode", ["🔙 BACKTEST", "🔴 LIVE MARKET"], index=1)
-    
-    # FIX: Use `today_ist` as default
     chosen_date = st.date_input("Date", value=today_ist) if mode == "🔙 BACKTEST" else today_ist
-    
     expiry_str = st.text_input("Expiry", value=get_next_tuesday(chosen_date))
     refresh_rate = st.slider("Auto-Refresh (Sec)", 5, 60, 5)
 
@@ -461,23 +434,17 @@ with st.sidebar:
             st.success("Sent!")
         else: st.error("Failed")
 
-st.title("🚀 Nifty Auto-Strategy (EMA 3 / Offset 2)")
+st.title("🚀 Nifty Auto-Strategy (Stop on Target)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
 
-# ----------------------------------------------------
-# SMART STATE TRACKING
-# ----------------------------------------------------
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
 
 def run_analysis_cycle():
-    # 1. Fetch 5 DAYS of History (to warm up the EMA)
-    # FIX: Use `chosen_date` which is now timezone-aware-friendly
     df_long = fetch_candle_data(api, NIFTY_TOKEN, "TEN_MINUTE", exchange="NSE", specific_date=chosen_date, days_back=5)
     
-    # 2. INJECT LIVE LTP (Into the long history)
     if mode == "🔴 LIVE MARKET":
         df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
 
@@ -485,10 +452,7 @@ def run_analysis_cycle():
         main_chart.warning(f"⚠️ No Data (Check Market Hours). Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
         
-    # 3. Calculate Indicators on LONG history (so values are ready at 9:15)
     df_long = add_custom_ema(df_long)
-    
-    # 4. SLICE: Keep only Today's Data for the Chart and Strategy
     df_today = df_long[df_long['datetime'].dt.date == chosen_date].copy()
     df_today = df_today.reset_index(drop=True)
 
@@ -496,41 +460,31 @@ def run_analysis_cycle():
         main_chart.warning(f"⚠️ No Data for Today yet. Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
     
-    # 5. Run Strategy on Sliced Data
     trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date)
     
     main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}"), use_container_width=True)
     
     if trades:
-        # Added SL Time and Target Time to the list of columns
         df_display = pd.DataFrame(trades)
-        styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.applymap(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
+        styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
         main_table.dataframe(styler, use_container_width=True)
         
-        # ------------------------------------------------
-        # INTELLIGENT ALERT LOGIC (Entry + Exit)
-        # ------------------------------------------------
         if mode == "🔴 LIVE MARKET":
             for trade in trades:
                 tid = trade["TradeID"]
                 current_result = trade["result"]
-                
-                # Retrieve last known state
                 last_known_state = st.session_state["trade_state"].get(tid, None)
                 
-                # TRIGGER 1: New Trade (Entry)
                 if last_known_state is None:
                     st.toast(f"New Entry Detected: Trade #{tid}", icon="🚀")
                     if send_email_notification(trade, alert_type="ENTRY"):
                         st.session_state["trade_state"][tid] = current_result
                         
-                # TRIGGER 2: Status Changed (Exit: Target or SL)
                 elif last_known_state != current_result:
                     if "OPEN" in last_known_state and ("TARGET" in current_result or "SL" in current_result):
                         st.toast(f"Exit Triggered: Trade #{tid} ({current_result})", icon="🔔")
                         if send_email_notification(trade, alert_type="EXIT"):
                             st.session_state["trade_state"][tid] = current_result
-        # ------------------------------------------------
     else:
         main_table.info("⏳ Waiting for Signals...")
         
