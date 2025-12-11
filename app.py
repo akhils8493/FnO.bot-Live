@@ -29,12 +29,13 @@ MAX_OPT_PRICE = 190   # Maximum Option Price to Enter
 # EMAIL CONFIGURATION
 # ---------------------------
 GMAIL_USER = "akhils8493@gmail.com"      
-GMAIL_PASSWORD = ""                      # <--- PUT YOUR 16-CHAR APP PASSWORD HERE
+GMAIL_PASSWORD = "tptr wtof dhkb jtht"                      # <--- PUT YOUR 16-CHAR APP PASSWORD HERE
 
 # LIST OF RECEIVERS
 TO_EMAILS = [
     "akhils8493@gmail.com", 
-    "shauryamraghaw@gmail.com"
+    "shauryamraghaw@gmail.com",
+    "kamal.padha99@gmail.com"
 ]
 
 st.set_page_config(page_title="Nifty Instant Bot", layout="wide")
