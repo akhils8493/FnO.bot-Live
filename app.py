@@ -42,7 +42,7 @@ TO_EMAILS = [
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Instant Bot (Stop on Target)", layout="wide")
+st.set_page_config(page_title="Nifty Instant Bot (Auto-Stop)", layout="wide")
 
 # ---------------------------
 # ANGEL LOGIN
@@ -216,15 +216,26 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
         return pd.DataFrame()
 
 def inject_live_ltp(df, api_obj, token, exchange="NSE"):
+    """
+    Injects LTP only if market is OPEN.
+    If market is closed (> 15:30), it returns original DF to avoid ghost candles.
+    """
     if df.empty: return df
     
+    now_ist = datetime.now(IST)
+    
+    # 🛑 MARKET HOURS CHECK 🛑
+    # If it is past 3:30 PM, DO NOT inject live data.
+    if now_ist.time() >= dtime(15, 30):
+        return df 
+    
+    # --- Proceed with Injection if Market Open ---
     ltp = fetch_ltp(api_obj, token, exchange)
     if ltp is None: return df 
     
     last_dt = df.iloc[-1]["datetime"].replace(tzinfo=None)
     
-    now_ist = datetime.now(IST).replace(microsecond=0)
-    now_naive = now_ist.replace(tzinfo=None)
+    now_naive = now_ist.replace(microsecond=0, tzinfo=None)
     
     minute_block = (now_naive.minute // 10) * 10
     current_candle_start = now_naive.replace(minute=minute_block, second=0)
@@ -266,6 +277,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
             
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
+        # ONLY INJECT IF TODAY AND MARKET IS OPEN
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
             
@@ -299,7 +311,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
     return False, None, None
 
 # ---------------------------
-# TRADES LOGIC (STOP ON TARGET)
+# TRADES LOGIC
 # ---------------------------
 def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date):
     trades = []
@@ -313,10 +325,10 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
         if trade_count >= 2: break
         curr_time = df.loc[idx, "datetime"]
 
-        # ---------------- ENTRY LOGIC ----------------
+        # ---------------- ENTRY ----------------
         if not trade_open and df.loc[idx, "alert_candle"]:
             
-            # --- PE ---
+            # PE
             if df.loc[idx, "above_ema_alert"]:
                 if last_trade_type != "PE":
                     if df.loc[idx + 1, "low"] < df.loc[idx, "low"]:
@@ -339,7 +351,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
                             }
 
-            # --- CE ---
+            # CE
             elif df.loc[idx, "below_ema_alert"]:
                 if last_trade_type != "CE":
                     if df.loc[idx + 1, "high"] > df.loc[idx, "high"]:
@@ -362,7 +374,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
                             }
 
-        # ---------------- EXIT LOGIC ----------------
+        # ---------------- EXIT ----------------
         elif trade_open and active_opt_df is not None:
             opt_rows = active_opt_df[active_opt_df["datetime"] == curr_time]
             if not opt_rows.empty:
@@ -374,8 +386,6 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
-                    
-                    # 🛑 STOP TRADING FOR THE DAY ON TARGET 🛑
                     break 
                     
                 # SL HIT
@@ -384,7 +394,6 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                     trades.append(trade_entry) 
                     trade_open = False
                     trade_count += 1
-                    # Note: We do NOT break here. We allow Trade 2 if SL was hit.
     
     if trade_open and trade_entry:
         trades.append(trade_entry)
@@ -434,13 +443,27 @@ with st.sidebar:
             st.success("Sent!")
         else: st.error("Failed")
 
-st.title("🚀 Nifty Auto-Strategy (Stop on Target)")
+st.title("🚀 Nifty Auto-Strategy (Auto-Stop)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
 
+# ----------------------------------------------------
+# SMART STATE TRACKING
+# ----------------------------------------------------
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
+
+def is_recent(timestamp_str, limit_minutes=15):
+    try:
+        now = datetime.now(IST)
+        event_time = datetime.strptime(timestamp_str, '%H:%M').time()
+        event_dt = datetime.combine(now.date(), event_time)
+        event_dt = IST.localize(event_dt) 
+        diff = now - event_dt
+        return diff < timedelta(minutes=limit_minutes) and diff >= timedelta(seconds=0)
+    except:
+        return True 
 
 def run_analysis_cycle():
     df_long = fetch_candle_data(api, NIFTY_TOKEN, "TEN_MINUTE", exchange="NSE", specific_date=chosen_date, days_back=5)
@@ -449,7 +472,7 @@ def run_analysis_cycle():
         df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
 
     if df_long.empty:
-        main_chart.warning(f"⚠️ No Data (Check Market Hours). Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
+        main_chart.warning(f"⚠️ No Data. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
         
     df_long = add_custom_ema(df_long)
@@ -457,7 +480,7 @@ def run_analysis_cycle():
     df_today = df_today.reset_index(drop=True)
 
     if df_today.empty:
-        main_chart.warning(f"⚠️ No Data for Today yet. Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
+        main_chart.warning(f"⚠️ No Data for Today. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
     
     trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date)
@@ -473,17 +496,29 @@ def run_analysis_cycle():
             for trade in trades:
                 tid = trade["TradeID"]
                 current_result = trade["result"]
+                signal_time_str = trade["Signal Time"]
                 last_known_state = st.session_state["trade_state"].get(tid, None)
                 
+                is_fresh_event = is_recent(signal_time_str, limit_minutes=15)
+
                 if last_known_state is None:
-                    st.toast(f"New Entry Detected: Trade #{tid}", icon="🚀")
-                    if send_email_notification(trade, alert_type="ENTRY"):
+                    if is_fresh_event:
+                        st.toast(f"New Entry: #{tid}", icon="🚀")
+                        if send_email_notification(trade, alert_type="ENTRY"):
+                            st.session_state["trade_state"][tid] = current_result
+                    else:
                         st.session_state["trade_state"][tid] = current_result
                         
                 elif last_known_state != current_result:
                     if "OPEN" in last_known_state and ("TARGET" in current_result or "SL" in current_result):
-                        st.toast(f"Exit Triggered: Trade #{tid} ({current_result})", icon="🔔")
-                        if send_email_notification(trade, alert_type="EXIT"):
+                        exit_time_str = trade.get("Target Time", "-") if "TARGET" in current_result else trade.get("SL Time", "-")
+                        is_fresh_exit = is_recent(exit_time_str, limit_minutes=15) if exit_time_str != "-" else True
+
+                        if is_fresh_exit:
+                            st.toast(f"Exit: #{tid} ({current_result})", icon="🔔")
+                            if send_email_notification(trade, alert_type="EXIT"):
+                                st.session_state["trade_state"][tid] = current_result
+                        else:
                             st.session_state["trade_state"][tid] = current_result
     else:
         main_table.info("⏳ Waiting for Signals...")
