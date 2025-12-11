@@ -7,14 +7,20 @@ import requests
 import os
 import pyotp
 import time
-import pytz
+import pytz  # <--- NEW IMPORT
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ---------------------------
+# TIMEZONE SETUP (CRITICAL FIX)
+# ---------------------------
+IST = pytz.timezone("Asia/Kolkata")
+
+# ---------------------------
 # CONFIGURATION
 # ---------------------------
+# ⚠️ SECURITY WARNING: Ideally, store these in st.secrets in Streamlit Cloud.
 API_KEY = "WM6i3ikL"
 CLIENT_ID = "AABY364105"
 PIN = "6954"
@@ -29,7 +35,7 @@ MAX_OPT_PRICE = 190   # Maximum Option Price to Enter
 # EMAIL CONFIGURATION
 # ---------------------------
 GMAIL_USER = "akhils8493@gmail.com"      
-GMAIL_PASSWORD = "tptr wtof dhkb jtht"                      # <--- PUT YOUR 16-CHAR APP PASSWORD HERE
+GMAIL_PASSWORD = "tptr wtof dhkb jtht"
 
 # LIST OF RECEIVERS
 TO_EMAILS = [
@@ -62,7 +68,7 @@ def angel_login():
 # ---------------------------
 def get_next_tuesday(date=None):
     if date is None:
-        date = datetime.today().date()
+        date = datetime.now(IST).date() # FIX: Use IST
     elif isinstance(date, pd.Timestamp):
         date = date.date()
     days_ahead = (1 - date.weekday()) % 7
@@ -99,7 +105,7 @@ def send_email_notification(trade_details, alert_type="ENTRY"):
         ENTRY PRICE : {trade_details['entry_price']}
         TARGET      : {trade_details['target']}
         STOP LOSS   : {trade_details['SL']}
-        TIME        : {datetime.now().strftime('%H:%M:%S')}
+        TIME        : {datetime.now(IST).strftime('%H:%M:%S')}
         ------------------------------------
         
         *This is an automated alert from your Nifty Bot.*
@@ -156,7 +162,7 @@ def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_
         return None
 
 # ---------------------------
-# DATA FETCHING (WARM-UP FIX)
+# DATA FETCHING (WARM-UP + TIMEZONE FIX)
 # ---------------------------
 def fetch_ltp(api_obj, token, exchange="NSE"):
     try:
@@ -168,18 +174,18 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
     return None
 
 def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=5):
-    """
-    Fetches data with a 5-day lookback to ensure EMA starts perfectly at 9:15 AM
-    """
     try:
-        now = datetime.now()
-        target_date = specific_date if specific_date else now.date()
+        # --- FIX: Force IST Timezone ---
+        now_ist = datetime.now(IST)
+        target_date = specific_date if specific_date else now_ist.date()
 
         # Determine End Time
-        if target_date == now.date():
-            to_dt = now
+        if target_date == now_ist.date():
+            to_dt = now_ist
         else:
+            # For backtesting past dates, set end time to 15:30 IST
             to_dt = datetime.combine(target_date, dtime(15, 30))
+            to_dt = IST.localize(to_dt) # Make aware
 
         # Determine Start Time (Go back 'days_back' days)
         from_dt = to_dt - timedelta(days=days_back)
@@ -189,6 +195,7 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
             "exchange": exchange, 
             "symboltoken": str(token), 
             "interval": interval,
+            # .strftime converts the time to string. Since `from_dt` is IST, the string will be correct IST time.
             "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), 
             "todate": to_dt.strftime("%Y-%m-%d %H:%M")
         }
@@ -202,8 +209,13 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
                     cols = ["datetime", "open", "high", "low", "close", "volume"]
                     df = pd.DataFrame(data, columns=cols)
                     
-                    # FIX TIMEZONE
-                    df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(None)
+                    # FIX TIMEZONE: Angel returns strings like "2023-10-27 09:15" (IST logic)
+                    # Convert to datetime objects, assume they are naive (local) time
+                    df["datetime"] = pd.to_datetime(df["datetime"])
+                    
+                    # Ensure no timezone info is attached to keep calculations simple
+                    if df["datetime"].dt.tz is not None:
+                        df["datetime"] = df["datetime"].dt.tz_localize(None)
                     
                     df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].apply(pd.to_numeric)
                     return df
@@ -222,9 +234,13 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
     
     last_dt = df.iloc[-1]["datetime"].replace(tzinfo=None)
     
-    now = datetime.now().replace(microsecond=0)
-    minute_block = (now.minute // 10) * 10
-    current_candle_start = now.replace(minute=minute_block, second=0)
+    # --- FIX: Calculate current candle time using IST ---
+    now_ist = datetime.now(IST).replace(microsecond=0)
+    # Convert to naive for dataframe compatibility
+    now_naive = now_ist.replace(tzinfo=None)
+    
+    minute_block = (now_naive.minute // 10) * 10
+    current_candle_start = now_naive.replace(minute=minute_block, second=0)
     
     if last_dt == current_candle_start:
         df.at[df.index[-1], 'close'] = ltp
@@ -269,7 +285,8 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         # FETCH 5 DAYS HISTORY FOR OPTIONS TOO
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
-        if trade_date == datetime.now().date():
+        # Check if trade_date is TODAY (IST)
+        if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
             
         if df_opt.empty: continue
@@ -426,8 +443,15 @@ master_df = get_scrip_master_df()
 
 with st.sidebar:
     st.header("⚙️ Controls")
+    
+    # FIX: Default to IST date
+    today_ist = datetime.now(IST).date()
+    
     mode = st.radio("Select Mode", ["🔙 BACKTEST", "🔴 LIVE MARKET"], index=1)
-    chosen_date = st.date_input("Date", value=pd.Timestamp.today()) if mode == "🔙 BACKTEST" else datetime.today().date()
+    
+    # FIX: Use `today_ist` as default
+    chosen_date = st.date_input("Date", value=today_ist) if mode == "🔙 BACKTEST" else today_ist
+    
     expiry_str = st.text_input("Expiry", value=get_next_tuesday(chosen_date))
     refresh_rate = st.slider("Auto-Refresh (Sec)", 5, 60, 5)
 
@@ -450,6 +474,7 @@ if "trade_state" not in st.session_state:
 
 def run_analysis_cycle():
     # 1. Fetch 5 DAYS of History (to warm up the EMA)
+    # FIX: Use `chosen_date` which is now timezone-aware-friendly
     df_long = fetch_candle_data(api, NIFTY_TOKEN, "TEN_MINUTE", exchange="NSE", specific_date=chosen_date, days_back=5)
     
     # 2. INJECT LIVE LTP (Into the long history)
@@ -457,7 +482,7 @@ def run_analysis_cycle():
         df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
 
     if df_long.empty:
-        main_chart.warning("⚠️ No Data")
+        main_chart.warning(f"⚠️ No Data (Check Market Hours). Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
         
     # 3. Calculate Indicators on LONG history (so values are ready at 9:15)
@@ -468,13 +493,13 @@ def run_analysis_cycle():
     df_today = df_today.reset_index(drop=True)
 
     if df_today.empty:
-        main_chart.warning("⚠️ No Data for Today yet (Market might be closed or just opened)")
+        main_chart.warning(f"⚠️ No Data for Today yet. Time is: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
     
     # 5. Run Strategy on Sliced Data
     trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date)
     
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now().strftime('%H:%M:%S')}"), use_container_width=True)
+    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}"), use_container_width=True)
     
     if trades:
         # Added SL Time and Target Time to the list of columns
@@ -509,7 +534,7 @@ def run_analysis_cycle():
     else:
         main_table.info("⏳ Waiting for Signals...")
         
-    top_status.caption(f"Last Scan: {datetime.now().strftime('%H:%M:%S')}")
+    top_status.caption(f"Last Scan: {datetime.now(IST).strftime('%H:%M:%S')}")
 
 if mode == "🔙 BACKTEST":
     if st.button("Run Backtest"):
