@@ -1,0 +1,7 @@
+# config.py
+API_KEY = "WM6i3ikL"
+CLIENT_CODE = "AABY364105"
+PIN = "6954"
+TOTP_SECRET = "D5PMGU3B674K4YFIQNE7CKDUSU"  # from Google Authenticator
+NIFTY_TOKEN = "99926000"  # NSE token ID for NIFTY 50
+
