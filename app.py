@@ -42,7 +42,7 @@ TO_EMAILS = [
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Master Bot", layout="wide")
+st.set_page_config(page_title="Nifty Auto-Bot", layout="wide")
 
 # ---------------------------
 # ANGEL LOGIN
@@ -430,6 +430,9 @@ analyzer_section = st.empty()
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
 
+# ---------------------------
+# CORE STATE CHECK & RUN LOGIC
+# ---------------------------
 def is_recent(timestamp_str, limit_minutes=15):
     try:
         now = datetime.now(IST)
@@ -461,7 +464,7 @@ def run_analysis_cycle():
     
     trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date)
     
-    # 1. Main Spot Chart (Always Visible)
+    # 1. Main Spot Chart
     main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
     
     if trades:
@@ -476,12 +479,9 @@ def run_analysis_cycle():
             with analyzer_section.container():
                 st.divider()
                 st.subheader("🔎 Trade Analysis (All Trades)")
-                
-                # LOOP THROUGH ALL TRADES AND DISPLAY CHARTS
                 for t_data in trades:
                     strike = t_data['Best Strike']
                     op_type = "CE" if "CE" in t_data['Nature'] else "PE"
-                    
                     st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
                     
                     token = get_token_from_master_cached(master_df, "NIFTY", expiry_str, strike, op_type)
@@ -491,17 +491,9 @@ def run_analysis_cycle():
                             df_opt_chart = add_custom_ema(df_opt_chart)
                             df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
                             lines = {"entry": t_data['entry_price'], "sl": t_data['SL'], "target": t_data['target']}
-                            
-                            fig_opt = plot_strategy_with_trades(
-                                df_opt_today_chart, 
-                                trades=[t_data], 
-                                title=f"OPTION: {strike} {op_type} ({t_data['result']})", 
-                                extra_lines=lines,
-                                is_option_chart=True 
-                            )
+                            fig_opt = plot_strategy_with_trades(df_opt_today_chart, trades=[t_data], title=f"OPTION: {strike} {op_type} ({t_data['result']})", extra_lines=lines, is_option_chart=True)
                             st.plotly_chart(fig_opt, use_container_width=True)
                         else: st.error(f"No Data for {strike} {op_type}")
-                    else: st.error(f"Token Not Found for {strike} {op_type}")
                     st.divider()
 
         # ----------------------------------
@@ -540,6 +532,9 @@ def run_analysis_cycle():
         
     top_status.caption(f"Last Scan: {datetime.now(IST).strftime('%H:%M:%S')}")
 
+# ----------------------------------
+# EXECUTION LOGIC (AUTO-START)
+# ----------------------------------
 if mode == "🔙 BACKTEST":
     if "backtest_data" not in st.session_state:
         st.session_state["backtest_data"] = None
@@ -547,18 +542,44 @@ if mode == "🔙 BACKTEST":
     if st.button("Run Backtest"):
         with st.spinner("Analyzing..."):
             run_analysis_cycle()
-            # Mark that we ran it so charts persist if we add interactivity later
             st.session_state["backtest_data"] = True
 
 elif mode == "🔴 LIVE MARKET":
-    if st.button("▶️ START AUTO-TRADING"):
-        st.success("Live Mode Started! Auto-refreshing...")
-        while True:
-            try:
-                run_analysis_cycle()
-                time.sleep(refresh_rate)
-            except KeyboardInterrupt:
-                st.stop()
-            except Exception as e:
-                top_status.error(f"Error: {e}")
-                time.sleep(10)
+    # AUTO-START LOGIC
+    # No "Start Button" needed. We assume if you selected "LIVE", you want it running.
+    
+    # 1. Provide a Stop Button
+    if "stop_bot" not in st.session_state:
+        st.session_state.stop_bot = False
+
+    if st.sidebar.button("⏹ STOP BOT"):
+        st.session_state.stop_bot = True
+    
+    if st.sidebar.button("▶️ RESTART"):
+        st.session_state.stop_bot = False
+
+    # 2. Check if we should run
+    if not st.session_state.stop_bot:
+        st.sidebar.success("✅ Bot Running...")
+        
+        # 3. Check Market Hours for Auto-Stop
+        now_time = datetime.now(IST).time()
+        market_open = dtime(9, 15) <= now_time <= dtime(15, 30)
+        
+        if market_open:
+            # Loop for Live Trading
+            while True:
+                try:
+                    run_analysis_cycle()
+                    time.sleep(refresh_rate)
+                except KeyboardInterrupt:
+                    break
+                except Exception as e:
+                    top_status.error(f"Loop Error: {e}")
+                    time.sleep(10)
+        else:
+            # Market Closed: Run Once (Static View) then Stop
+            run_analysis_cycle()
+            st.info("Market Closed. Bot is in Sleep Mode.")
+    else:
+        st.warning("Bot Manually Stopped.")
