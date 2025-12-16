@@ -70,9 +70,14 @@ def get_next_tuesday(date=None):
         date = datetime.now(IST).date()
     elif isinstance(date, pd.Timestamp):
         date = date.date()
+    
+    # Tuesday is index 1 (Monday=0, Tuesday=1, etc.)
     days_ahead = (1 - date.weekday()) % 7
-    if days_ahead == 0:
-        days_ahead = 7
+    
+    # NOTE: The previous code had "if days_ahead == 0: days_ahead = 7"
+    # That forced it to skip to next week if today was Tuesday.
+    # We have REMOVED that line so it selects TODAY if today is Tuesday.
+    
     next_tues = date + timedelta(days=days_ahead)
     return next_tues.strftime("%d%b%Y").upper()
 
