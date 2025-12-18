@@ -550,7 +550,7 @@ with st.sidebar:
     
     st.caption(f"🗓️ Using Expiry: **{expiry_str}**")
     
-    refresh_rate = st.slider("Auto-Refresh (Sec)", 5, 60, 5)
+    refresh_rate = st.slider("Auto-Refresh (Sec)", 8, 60, 8)
 
     st.divider()
     if st.button("Send Test Alert"):
