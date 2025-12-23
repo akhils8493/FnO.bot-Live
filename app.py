@@ -31,7 +31,7 @@ NIFTY_TOKEN = "99926000"
 # STRATEGY SETTINGS
 MIN_OPT_PRICE = 142
 MAX_OPT_PRICE = 195
-ORDER_QTY = 75  # Fixed Quantity as requested
+ORDER_QTY = 75  # Fixed Quantity
 
 # ---------------------------
 # EMAIL CONFIGURATION
@@ -81,38 +81,58 @@ def get_atm_strike(price):
     return round(price / 50) * 50
 
 # ---------------------------
-# EMAIL FUNCTION
+# EMAIL FUNCTION (UPDATED)
 # ---------------------------
-def send_email_notification(trade_details, alert_type="ENTRY"):
+def send_email_notification(data, alert_type="ENTRY"):
     try:
-        if "TARGET" in str(trade_details['result']):
-            subject_prefix = "✅ TARGET HIT"
-        elif "SL" in str(trade_details['result']):
-            subject_prefix = "🔴 SL HIT"
+        # --- 1. ORDER PLACEMENT EMAIL ---
+        if alert_type == "ORDER":
+            subject = f"✅ ORDER PLACED: {data['Symbol']} (ID: {data['OrderID']})"
+            body = f"""
+            🚀 ORDER EXECUTION REPORT
+            
+            ------------------------------------
+            SYMBOL      : {data['Symbol']}
+            ORDER ID    : {data['OrderID']}
+            ------------------------------------
+            TYPE        : {data['Type']}
+            QUANTITY    : {data['Qty']}
+            PRICE       : {data['Price']}
+            TOTAL VAL   : {data['Total Amount']}
+            TIME        : {data['Time']}
+            ------------------------------------
+            
+            *Order successfully sent to Angel One.*
+            """
+
+        # --- 2. STRATEGY ALERT EMAIL ---
         else:
-            subject_prefix = "🚀 NEW ENTRY"
+            if "TARGET" in str(data['result']):
+                subject_prefix = "✅ TARGET HIT"
+            elif "SL" in str(data['result']):
+                subject_prefix = "🔴 SL HIT"
+            else:
+                subject_prefix = "🚀 NEW SIGNAL"
 
-        time_display = trade_details.get('Signal Time', datetime.now(IST).strftime('%H:%M:%S'))
+            time_display = data.get('Signal Time', datetime.now(IST).strftime('%H:%M:%S'))
+            subject = f"{subject_prefix}: {data['Nature']} @ {data['entry_price']}"
+            
+            body = f"""
+            🔔 STRATEGY ALERT: {subject_prefix}
+            
+            ------------------------------------
+            STATUS      : {data['result']}
+            ------------------------------------
+            TYPE        : {data['Nature']}
+            STRIKE      : {data['Best Strike']}
+            ENTRY PRICE : {data['entry_price']}
+            TARGET      : {data['target']}
+            STOP LOSS   : {data['SL']}
+            TIME        : {time_display}
+            ------------------------------------
+            """
 
-        subject = f"{subject_prefix}: {trade_details['Nature']} @ {trade_details['entry_price']}"
-        
-        body = f"""
-        🔔 TRADE UPDATE: {subject_prefix}
-        
-        ------------------------------------
-        STATUS      : {trade_details['result']}
-        ------------------------------------
-        TYPE        : {trade_details['Nature']}
-        STRIKE      : {trade_details['Best Strike']}
-        ENTRY PRICE : {trade_details['entry_price']}
-        TARGET      : {trade_details['target']}
-        STOP LOSS   : {trade_details['SL']}
-        TIME        : {time_display}
-        ------------------------------------
-        
-        *This is an automated alert from your Nifty Bot.*
-        """
-
+        # --- SENDING LOGIC ---
         msg = MIMEMultipart()
         msg['From'] = GMAIL_USER
         msg['To'] = ", ".join(TO_EMAILS)
@@ -164,7 +184,6 @@ def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_
         return None
 
 def get_symbol_from_token(df_master, token):
-    """Retrieves the trading symbol name using the token"""
     try:
         row = df_master[df_master['token'] == str(token)]
         if not row.empty:
@@ -174,12 +193,9 @@ def get_symbol_from_token(df_master, token):
         return None
 
 # ---------------------------
-# ORDER PLACEMENT (NEW)
+# ORDER PLACEMENT
 # ---------------------------
 def place_angel_order(api_obj, token, symbol, price):
-    """
-    Places a LIMIT BUY Order.
-    """
     try:
         orderparams = {
             "variety": "NORMAL",
@@ -188,12 +204,11 @@ def place_angel_order(api_obj, token, symbol, price):
             "transactiontype": "BUY",
             "exchange": "NFO",
             "ordertype": "LIMIT",
-            "producttype": "INTRADAY", # Or "INTRADAY" based on preference
+            "producttype": "INTRADAY",
             "duration": "DAY",
             "price": str(price),
             "quantity": str(ORDER_QTY)
         }
-        
         orderId = api_obj.placeOrder(orderparams)
         return orderId
     except Exception as e:
@@ -298,7 +313,6 @@ def add_custom_ema(df):
     df["body_top"] = df[["open", "close"]].max(axis=1)
     df["body_bottom"] = df[["open", "close"]].min(axis=1)
 
-    # VISUAL BUFFER: 2 points
     buffer = 2.0 
 
     df["above_ema_alert"] = df["body_bottom"] > (df["ema_3_smooth"] + buffer)
@@ -433,7 +447,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "Signal Close": df.loc[idx, "close"], "type": "PE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
-                                "token": opt_token # STORE TOKEN FOR ORDER
+                                "token": opt_token
                             }
 
             # BUY CE
@@ -480,7 +494,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "Signal Close": df.loc[idx, "close"], "type": "CE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
-                                "token": opt_token # STORE TOKEN FOR ORDER
+                                "token": opt_token
                             }
 
         elif trade_open and active_opt_df is not None:
@@ -580,12 +594,27 @@ with st.sidebar:
         if send_email_notification({"Nature": "TEST - BUY CE", "Best Strike": 24500, "Signal Time": datetime.now(IST).strftime('%H:%M:%S'), "entry_price": 100, "target": 120, "SL": 80, "result": "TEST"}):
             st.success("Sent!")
         else: st.error("Failed")
+        
+    if st.button("Send Test Order Email"):
+        test_order_data = {
+            "Time": datetime.now(IST).strftime('%H:%M:%S'),
+            "Symbol": "NIFTY30DEC24500CE",
+            "Type": "BUY (LIMIT)",
+            "Qty": ORDER_QTY,
+            "Price": 150.50,
+            "Total Amount": ORDER_QTY * 150.50,
+            "OrderID": "TEST-12345678"
+        }
+        if send_email_notification(test_order_data, alert_type="ORDER"):
+            st.success("Sent Order Email!")
+        else:
+            st.error("Failed")
 
 st.title("🚀 Nifty Master Bot (Sequential)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
-order_table = st.empty() # NEW TABLE
+order_table = st.empty() 
 analyzer_section = st.empty()
 
 # --- INITIALIZE SESSION STATE ---
@@ -722,7 +751,7 @@ def run_analysis_cycle():
                                 if order_id:
                                     st.toast(f"Order Placed! ID: {order_id}", icon="✅")
                                     # Log to Order Book
-                                    st.session_state["order_book"].append({
+                                    order_details = {
                                         "Time": datetime.now(IST).strftime('%H:%M:%S'),
                                         "Symbol": symbol_name,
                                         "Type": "BUY (LIMIT)",
@@ -730,12 +759,17 @@ def run_analysis_cycle():
                                         "Price": trade["entry_price"],
                                         "Total Amount": ORDER_QTY * trade["entry_price"],
                                         "OrderID": order_id
-                                    })
+                                    }
+                                    st.session_state["order_book"].append(order_details)
+                                    
+                                    # Send ORDER Email
+                                    send_email_notification(order_details, alert_type="ORDER")
                                 else:
                                     st.error("Failed to place order!")
                             else:
                                 st.error("Symbol Name not found for Token!")
                         
+                        # Send STRATEGY Email
                         if send_email_notification(trade, alert_type="ENTRY"):
                             st.session_state["trade_state"][tid] = current_result
                     else:
