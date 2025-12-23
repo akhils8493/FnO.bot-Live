@@ -31,6 +31,7 @@ NIFTY_TOKEN = "99926000"
 # STRATEGY SETTINGS
 MIN_OPT_PRICE = 142
 MAX_OPT_PRICE = 195
+ORDER_QTY = 75  # Fixed Quantity as requested
 
 # ---------------------------
 # EMAIL CONFIGURATION
@@ -161,6 +162,43 @@ def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_
         return None
     except Exception as e:
         return None
+
+def get_symbol_from_token(df_master, token):
+    """Retrieves the trading symbol name using the token"""
+    try:
+        row = df_master[df_master['token'] == str(token)]
+        if not row.empty:
+            return row.iloc[0]['symbol']
+        return None
+    except:
+        return None
+
+# ---------------------------
+# ORDER PLACEMENT (NEW)
+# ---------------------------
+def place_angel_order(api_obj, token, symbol, price):
+    """
+    Places a LIMIT BUY Order.
+    """
+    try:
+        orderparams = {
+            "variety": "NORMAL",
+            "tradingsymbol": symbol,
+            "symboltoken": str(token),
+            "transactiontype": "BUY",
+            "exchange": "NFO",
+            "ordertype": "LIMIT",
+            "producttype": "CARRYFORWARD", # Or "INTRADAY" based on preference
+            "duration": "DAY",
+            "price": str(price),
+            "quantity": str(ORDER_QTY)
+        }
+        
+        orderId = api_obj.placeOrder(orderparams)
+        return orderId
+    except Exception as e:
+        print(f"Order Placement Error: {e}")
+        return False
 
 # ---------------------------
 # DATA FETCHING
@@ -394,7 +432,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "TradeID": trade_count + 1, "Nature": "BUY PE", "Signal Time": display_time, 
                                 "Signal Close": df.loc[idx, "close"], "type": "PE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
-                                "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
+                                "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
+                                "token": opt_token # STORE TOKEN FOR ORDER
                             }
 
             # BUY CE
@@ -440,7 +479,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "TradeID": trade_count + 1, "Nature": "BUY CE", "Signal Time": display_time,
                                 "Signal Close": df.loc[idx, "close"], "type": "CE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
-                                "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
+                                "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
+                                "token": opt_token # STORE TOKEN FOR ORDER
                             }
 
         elif trade_open and active_opt_df is not None:
@@ -545,14 +585,18 @@ st.title("🚀 Nifty Master Bot (Sequential)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
+order_table = st.empty() # NEW TABLE
 analyzer_section = st.empty()
 
-# --- INITIALIZE SESSION STATE FOR PERSISTENCE ---
+# --- INITIALIZE SESSION STATE ---
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
 
 if "session_trades" not in st.session_state:
     st.session_state["session_trades"] = []
+
+if "order_book" not in st.session_state:
+    st.session_state["order_book"] = []
 
 # ---------------------------
 # CORE STATE CHECK & RUN LOGIC
@@ -603,39 +647,27 @@ def run_analysis_cycle():
     
     current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
     
-    # ----------------------------------------------------
-    # SAFETY CHECK: "STATE CONTINUITY" (Prevent False Signals on Corrupt Data)
-    # ----------------------------------------------------
-    # Logic:
-    # 1. If we have a saved trade that is OPEN.
-    # 2. But the new 'current_trades' list DOES NOT contain that trade.
-    # 3. This implies the new data feed is "blind" to the past signal.
-    # 4. If we accept this, the bot will think NO trade is open and might take a fake new trade.
-    # 5. ACTION: Reject the update. Keep the old state.
-    
+    # --- SAFETY CHECK: State Continuity ---
     should_update = True
     
     if st.session_state["session_trades"]:
         last_saved_trade = st.session_state["session_trades"][-1]
         
-        # Only check continuity if the last known state was OPEN
         if "OPEN" in last_saved_trade["result"]:
             found_in_new = False
             for t in current_trades:
-                # Unique ID for a trade is its entry timestamp
                 if t["entry_time"] == last_saved_trade["entry_time"]:
                     found_in_new = True
                     break
             
             if not found_in_new:
                 should_update = False
-                st.toast("⚠️ Data Glitch Detected! Open Trade vanished from feed. Keeping old state.", icon="🛡️")
-                main_chart.warning(f"⚠️ Data Instability detected at {datetime.now(IST).strftime('%H:%M:%S')}. Ignoring scan to protect Open Trade.")
+                st.toast("⚠️ Data Glitch Detected! Open Trade vanished. Keeping old state.", icon="🛡️")
+                main_chart.warning(f"⚠️ Data Instability detected at {datetime.now(IST).strftime('%H:%M:%S')}. Ignoring scan.")
 
     if should_update:
         st.session_state["session_trades"] = current_trades
     
-    # Use session state for display (Always the Safe Version)
     trades_to_display = st.session_state["session_trades"]
 
     main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
@@ -668,6 +700,8 @@ def run_analysis_cycle():
 
         if mode == "🔴 LIVE MARKET":
             analyzer_section.empty()
+            
+            # --- 1. PROCESS ALERTS & ORDERS ---
             for trade in trades_to_display:
                 tid = trade["TradeID"]
                 current_result = trade["result"]
@@ -678,6 +712,30 @@ def run_analysis_cycle():
                 if last_known_state is None:
                     if is_fresh_event:
                         st.toast(f"New Entry: #{tid}", icon="🚀")
+                        
+                        # --- PLACE ORDER LOGIC ---
+                        token = trade.get("token")
+                        if token:
+                            symbol_name = get_symbol_from_token(master_df, token)
+                            if symbol_name:
+                                order_id = place_angel_order(api, token, symbol_name, trade["entry_price"])
+                                if order_id:
+                                    st.toast(f"Order Placed! ID: {order_id}", icon="✅")
+                                    # Log to Order Book
+                                    st.session_state["order_book"].append({
+                                        "Time": datetime.now(IST).strftime('%H:%M:%S'),
+                                        "Symbol": symbol_name,
+                                        "Type": "BUY (LIMIT)",
+                                        "Qty": ORDER_QTY,
+                                        "Price": trade["entry_price"],
+                                        "Total Amount": ORDER_QTY * trade["entry_price"],
+                                        "OrderID": order_id
+                                    })
+                                else:
+                                    st.error("Failed to place order!")
+                            else:
+                                st.error("Symbol Name not found for Token!")
+                        
                         if send_email_notification(trade, alert_type="ENTRY"):
                             st.session_state["trade_state"][tid] = current_result
                     else:
@@ -694,8 +752,13 @@ def run_analysis_cycle():
                                 st.session_state["trade_state"][tid] = current_result
                         else:
                             st.session_state["trade_state"][tid] = current_result
+            
+            # --- 2. DISPLAY ORDER BOOK (NEW TABLE) ---
+            if st.session_state["order_book"]:
+                st.write("### 📝 Order Book (Live Executions)")
+                st.dataframe(pd.DataFrame(st.session_state["order_book"]), use_container_width=True)
+                
     else:
-        # If no trades found yet, check if we have stale data to show
         if st.session_state["session_trades"]:
             df_display = pd.DataFrame(st.session_state["session_trades"])
             styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
