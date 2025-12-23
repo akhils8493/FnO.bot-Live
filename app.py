@@ -188,7 +188,7 @@ def place_angel_order(api_obj, token, symbol, price):
             "transactiontype": "BUY",
             "exchange": "NFO",
             "ordertype": "LIMIT",
-            "producttype": "CARRYFORWARD", # Or "INTRADAY" based on preference
+            "producttype": "INTRADAY", # Or "INTRADAY" based on preference
             "duration": "DAY",
             "price": str(price),
             "quantity": str(ORDER_QTY)
