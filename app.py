@@ -21,6 +21,7 @@ IST = pytz.timezone("Asia/Kolkata")
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
+# !!! REPLACE THESE WITH YOUR ACTUAL CREDENTIALS !!!
 API_KEY = "WM6i3ikL"
 CLIENT_ID = "AABY364105"
 PIN = "6954"
@@ -34,11 +35,11 @@ MAX_OPT_PRICE = 195
 # ---------------------------
 # EMAIL CONFIGURATION
 # ---------------------------
-GMAIL_USER = "akhils8493@gmail.com"      
+GMAIL_USER = "akhils8493@gmail.com"
 GMAIL_PASSWORD = "tptr wtof dhkb jtht" 
 
 TO_EMAILS = [
-    "akhils8493@gmail.com", 
+    "akhils8493@gmail.com",
     "shauryamraghaw@gmail.com",
     "kamal.padha99@gmail.com"
 ]
@@ -71,10 +72,7 @@ def get_next_tuesday(date=None):
     elif isinstance(date, pd.Timestamp):
         date = date.date()
     
-    # Tuesday is index 1
     days_ahead = (1 - date.weekday()) % 7
-    # If days_ahead is 0 (Today is Tuesday), we KEEP it 0 to select TODAY.
-    
     next_tues = date + timedelta(days=days_ahead)
     return next_tues.strftime("%d%b%Y").upper()
 
@@ -176,9 +174,8 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
         pass
     return None
 
-def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=5, custom_from=None, custom_to=None):
+def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=360, custom_from=None, custom_to=None):
     try:
-        # If custom range provided (for drill-down), use it
         if custom_from and custom_to:
             from_dt = custom_from
             to_dt = custom_to
@@ -253,28 +250,30 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
     return df
 
 # ---------------------------
-# INDICATORS & LOGIC
+# INDICATORS & LOGIC (BUFFERED)
 # ---------------------------
 def add_custom_ema(df):
     df = df.copy()
     df["ema_3_base"] = df["close"].ewm(span=3, adjust=False).mean()
     df["ema_3_smooth"] = df["ema_3_base"].shift(2)
-    df["above_ema_alert"] = df["low"] > df["ema_3_smooth"] 
-    df["below_ema_alert"] = df["high"] < df["ema_3_smooth"] 
+    
+    df["body_top"] = df[["open", "close"]].max(axis=1)
+    df["body_bottom"] = df[["open", "close"]].min(axis=1)
+
+    # VISUAL BUFFER: 2 points
+    buffer = 2.0 
+
+    df["above_ema_alert"] = df["body_bottom"] > (df["ema_3_smooth"] + buffer)
+    df["below_ema_alert"] = df["body_top"] < (df["ema_3_smooth"] - buffer)
     df["alert_candle"] = df["above_ema_alert"] | df["below_ema_alert"]
     return df
 
-# --- PRECISE TIME FINDER (UPDATED FOR ENTRY/SL/TARGET) ---
+# --- PRECISE TIME FINDER ---
 def find_precise_event_time(api_obj, token, start_time_10min, threshold_price, condition="GT", exchange="NSE"):
-    """
-    Fetches 1-minute data for the specific 10-minute block.
-    Iterates to find the FIRST minute where price crossed the threshold.
-    """
     try:
         from_dt = start_time_10min
         to_dt = start_time_10min + timedelta(minutes=10)
         
-        # NOTE: Exchange is passed dynamically now (NFO for Options)
         df_1min = fetch_candle_data(api_obj, token, "ONE_MINUTE", exchange=exchange, custom_from=from_dt, custom_to=to_dt)
         
         if df_1min.empty:
@@ -282,12 +281,11 @@ def find_precise_event_time(api_obj, token, start_time_10min, threshold_price, c
             
         for _, row in df_1min.iterrows():
             if condition == "GT":
-                if row['high'] >= threshold_price: # Use >= for Buy Entry / Target
+                if row['high'] >= threshold_price: 
                     return row['datetime'] 
             elif condition == "LT":
-                if row['low'] <= threshold_price: # Use <= for SL
+                if row['low'] <= threshold_price: 
                     return row['datetime']
-                    
         return start_time_10min 
     except:
         return start_time_10min
@@ -301,7 +299,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         token = get_token_from_master_cached(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
-        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
+        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=360)
         
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
@@ -341,39 +339,32 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
     trade_count = 0
     last_trade_type = None 
     active_opt_df = None 
-    active_opt_token = None # Track the active token for exit timing
+    active_opt_token = None 
     
     for idx in range(len(df) - 1):
         if trade_count >= 2: break
         
-        curr_time = df.loc[idx, "datetime"] # Alert Candle Time
+        curr_time = df.loc[idx, "datetime"] 
         entry_idx = idx + 1
         entry_candle_time = df.loc[entry_idx, "datetime"]
         
-        # Check if this specific candle is the LIVE forming candle
         is_current_live_candle = is_live_mode and (entry_idx == len(df) - 1)
 
         if not trade_open and df.loc[idx, "alert_candle"]:
-            # ---------------------------
-            # BUY PE LOGIC
-            # ---------------------------
+            # BUY PE
             if df.loc[idx, "above_ema_alert"]:
                 if last_trade_type != "PE":
-                    # TRIGGER CHECK: Entry Low < Alert Low (On Spot)
                     if df.loc[entry_idx, "low"] < df.loc[idx, "low"]:
                         
                         is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
                             api_obj, master_df, expiry_date, curr_time, "PE", df.loc[idx, "open"], trade_date)
                         
                         if is_valid:
-                            # --- MATH & LOGIC ---
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
                             opt_alert_row = opt_df.iloc[opt_alert_idx]
                             opt_entry_row = opt_df.iloc[opt_alert_idx + 1] 
-
                             opt_entry_price = opt_alert_row["high"]
                             
-                            # --- TIME PRECISION (ENTRY) ---
                             if is_current_live_candle:
                                 display_time = datetime.now(IST).strftime('%H:%M:%S')
                             else:
@@ -388,15 +379,16 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             active_opt_df = opt_df
                             active_opt_token = opt_token
                             
-                            # SL Logic
-                            raw_sl = opt_alert_row["low"] 
-                            if opt_entry_row["low"] < raw_sl: 
-                                raw_sl = opt_entry_row["low"]
+                            # --- CALCULATIONS ---
+                            raw_sl_val = opt_alert_row["low"] 
+                            if opt_entry_row["low"] < raw_sl_val: 
+                                raw_sl_val = opt_entry_row["low"]
 
-                            final_sl = math.floor(raw_sl)
-                            risk = opt_entry_price - final_sl
-                            raw_target = opt_entry_price + (3 * risk)
-                            final_target = math.floor(raw_target / 5) * 5
+                            exact_risk = opt_entry_price - raw_sl_val
+                            exact_target = opt_entry_price + (3 * exact_risk)
+
+                            final_sl = math.floor(raw_sl_val)
+                            final_target = math.floor(exact_target / 5) * 5
 
                             trade_entry = {
                                 "TradeID": trade_count + 1, "Nature": "BUY PE", "Signal Time": display_time, 
@@ -405,26 +397,20 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-"
                             }
 
-            # ---------------------------
-            # BUY CE LOGIC
-            # ---------------------------
+            # BUY CE
             elif df.loc[idx, "below_ema_alert"]:
                 if last_trade_type != "CE":
-                    # TRIGGER CHECK: Entry High > Alert High (On Spot)
                     if df.loc[entry_idx, "high"] > df.loc[idx, "high"]:
                         
                         is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
                             api_obj, master_df, expiry_date, curr_time, "CE", df.loc[idx, "open"], trade_date)
                         
                         if is_valid:
-                            # --- MATH & LOGIC ---
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
                             opt_alert_row = opt_df.iloc[opt_alert_idx]
                             opt_entry_row = opt_df.iloc[opt_alert_idx + 1] 
-
                             opt_entry_price = opt_alert_row["high"]
 
-                            # --- TIME PRECISION (ENTRY) ---
                             if is_current_live_candle:
                                 display_time = datetime.now(IST).strftime('%H:%M:%S')
                             else:
@@ -439,15 +425,16 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             active_opt_df = opt_df
                             active_opt_token = opt_token
 
-                            # SL Logic
-                            raw_sl = opt_alert_row["low"] 
-                            if opt_entry_row["low"] < raw_sl: 
-                                raw_sl = opt_entry_row["low"]
+                            # --- CALCULATIONS ---
+                            raw_sl_val = opt_alert_row["low"] 
+                            if opt_entry_row["low"] < raw_sl_val: 
+                                raw_sl_val = opt_entry_row["low"]
 
-                            final_sl = math.floor(raw_sl)
-                            risk = opt_entry_price - final_sl
-                            raw_target = opt_entry_price + (3 * risk)
-                            final_target = math.floor(raw_target / 5) * 5
+                            exact_risk = opt_entry_price - raw_sl_val
+                            exact_target = opt_entry_price + (3 * exact_risk)
+
+                            final_sl = math.floor(raw_sl_val)
+                            final_target = math.floor(exact_target / 5) * 5
 
                             trade_entry = {
                                 "TradeID": trade_count + 1, "Nature": "BUY CE", "Signal Time": display_time,
@@ -461,9 +448,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
             if not opt_rows.empty:
                 opt_row = opt_rows.iloc[0]
                 
-                # 1. TARGET CHECK
+                # TARGET
                 if opt_row["high"] >= trade_entry["target"]:
-                    # --- TIME PRECISION (TARGET) ---
                     if is_current_live_candle:
                          exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
                     else:
@@ -479,17 +465,14 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                     trade_count += 1
                     break 
                 
-                # 2. SL CHECK
+                # SL
                 elif opt_row["low"] <= trade_entry["SL"]:
-                    # Prevent Entry Candle from stopping itself out immediately if Low touches SL
                     is_entry_candle = (curr_time == trade_entry["entry_time"])
                     is_touching_sl = (opt_row["low"] == trade_entry["SL"])
                     
                     if is_entry_candle and is_touching_sl:
-                        # Ignore "Touching SL" on the very first candle of entry
                         pass
                     else:
-                        # --- TIME PRECISION (SL) ---
                         if is_current_live_candle:
                             exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
                         else:
@@ -564,8 +547,12 @@ main_chart = st.empty()
 main_table = st.empty() 
 analyzer_section = st.empty()
 
+# --- INITIALIZE SESSION STATE FOR PERSISTENCE ---
 if "trade_state" not in st.session_state:
     st.session_state["trade_state"] = {}
+
+if "session_trades" not in st.session_state:
+    st.session_state["session_trades"] = []
 
 # ---------------------------
 # CORE STATE CHECK & RUN LOGIC
@@ -586,7 +573,15 @@ def is_recent(timestamp_str, limit_minutes=15):
         return True 
 
 def run_analysis_cycle():
-    df_long = fetch_candle_data(api, NIFTY_TOKEN, "TEN_MINUTE", exchange="NSE", specific_date=chosen_date, days_back=5)
+    df_long = fetch_candle_data(
+        api, 
+        NIFTY_TOKEN, 
+        "TEN_MINUTE", 
+        exchange="NSE", 
+        specific_date=chosen_date, 
+        days_back=360 
+    )
+    
     is_live = False
     
     if mode == "🔴 LIVE MARKET":
@@ -598,6 +593,7 @@ def run_analysis_cycle():
         return
         
     df_long = add_custom_ema(df_long)
+    
     df_today = df_long[df_long['datetime'].dt.date == chosen_date].copy()
     df_today = df_today.reset_index(drop=True)
 
@@ -605,12 +601,47 @@ def run_analysis_cycle():
         main_chart.warning(f"⚠️ No Data for Today. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
     
-    trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
+    current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
     
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
+    # ----------------------------------------------------
+    # SAFETY CHECK: "STATE CONTINUITY" (Prevent False Signals on Corrupt Data)
+    # ----------------------------------------------------
+    # Logic:
+    # 1. If we have a saved trade that is OPEN.
+    # 2. But the new 'current_trades' list DOES NOT contain that trade.
+    # 3. This implies the new data feed is "blind" to the past signal.
+    # 4. If we accept this, the bot will think NO trade is open and might take a fake new trade.
+    # 5. ACTION: Reject the update. Keep the old state.
     
-    if trades:
-        df_display = pd.DataFrame(trades)
+    should_update = True
+    
+    if st.session_state["session_trades"]:
+        last_saved_trade = st.session_state["session_trades"][-1]
+        
+        # Only check continuity if the last known state was OPEN
+        if "OPEN" in last_saved_trade["result"]:
+            found_in_new = False
+            for t in current_trades:
+                # Unique ID for a trade is its entry timestamp
+                if t["entry_time"] == last_saved_trade["entry_time"]:
+                    found_in_new = True
+                    break
+            
+            if not found_in_new:
+                should_update = False
+                st.toast("⚠️ Data Glitch Detected! Open Trade vanished from feed. Keeping old state.", icon="🛡️")
+                main_chart.warning(f"⚠️ Data Instability detected at {datetime.now(IST).strftime('%H:%M:%S')}. Ignoring scan to protect Open Trade.")
+
+    if should_update:
+        st.session_state["session_trades"] = current_trades
+    
+    # Use session state for display (Always the Safe Version)
+    trades_to_display = st.session_state["session_trades"]
+
+    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
+    
+    if trades_to_display:
+        df_display = pd.DataFrame(trades_to_display)
         styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
         main_table.dataframe(styler, use_container_width=True)
         
@@ -618,14 +649,14 @@ def run_analysis_cycle():
             with analyzer_section.container():
                 st.divider()
                 st.subheader("🔎 Trade Analysis (All Trades)")
-                for t_data in trades:
+                for t_data in trades_to_display:
                     strike = t_data['Best Strike']
                     op_type = "CE" if "CE" in t_data['Nature'] else "PE"
                     st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
                     
                     token = get_token_from_master_cached(master_df, "NIFTY", expiry_str, strike, op_type)
                     if token:
-                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=5)
+                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=360)
                         if not df_opt_chart.empty:
                             df_opt_chart = add_custom_ema(df_opt_chart)
                             df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
@@ -637,13 +668,11 @@ def run_analysis_cycle():
 
         if mode == "🔴 LIVE MARKET":
             analyzer_section.empty()
-            for trade in trades:
+            for trade in trades_to_display:
                 tid = trade["TradeID"]
                 current_result = trade["result"]
                 signal_time_str = trade["Signal Time"]
-                
                 last_known_state = st.session_state["trade_state"].get(tid, None)
-                
                 is_fresh_event = is_recent(signal_time_str, limit_minutes=15)
 
                 if last_known_state is None:
@@ -666,7 +695,14 @@ def run_analysis_cycle():
                         else:
                             st.session_state["trade_state"][tid] = current_result
     else:
-        main_table.info("⏳ Waiting for Signals...")
+        # If no trades found yet, check if we have stale data to show
+        if st.session_state["session_trades"]:
+            df_display = pd.DataFrame(st.session_state["session_trades"])
+            styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
+            main_table.dataframe(styler, use_container_width=True)
+            main_table.info("⚠️ Showing last known data (Scan failed or returned empty).")
+        else:
+            main_table.info("⏳ Waiting for Signals...")
         
     top_status.caption(f"Last Scan: {datetime.now(IST).strftime('%H:%M:%S')}")
 
