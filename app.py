@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta, time as dtime
 from SmartApi import SmartConnect
+from dhanhq import dhanhq  # NEW IMPORT
 import requests
 import os
 import pyotp
@@ -10,8 +11,14 @@ import time
 import pytz
 import smtplib
 import math
+import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# ---------------------------
+# SSL CONTEXT (For Dhan CSV)
+# ---------------------------
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # ---------------------------
 # TIMEZONE SETUP
@@ -21,17 +28,22 @@ IST = pytz.timezone("Asia/Kolkata")
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-# !!! REPLACE THESE WITH YOUR ACTUAL CREDENTIALS !!!
+# --- ANGEL ONE CREDENTIALS ---
 API_KEY = "WM6i3ikL"
 CLIENT_ID = "AABY364105"
 PIN = "6954"
 TOTP_TOKEN = "D5PMGU3B674K4YFIQNE7CKDUSU"
 NIFTY_TOKEN = "99926000"
 
+# --- DHAN CREDENTIALS (REPLACE THESE) ---
+DHAN_CLIENT_ID = "2512259667"   # e.g., "1100087829"
+DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY2NzQ0MTc4LCJpYXQiOjE3NjY2NTc3NzgsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwMDg3ODI5In0.GAaZBKkdn6Fay6OOQQiMdIhIbV6d5tZsBfQCLMdHgg4EkAjTFKeIPCJPb1J7LXp0gc78ryOPahH8EbyAnXYnYQ" # Long JWT string
+
+
 # STRATEGY SETTINGS
 MIN_OPT_PRICE = 142
 MAX_OPT_PRICE = 195
-ORDER_QTY = 75  # Fixed Quantity
+ORDER_QTY = 75  # Fixed Quantity (1 Lot)
 
 # ---------------------------
 # EMAIL CONFIGURATION
@@ -45,10 +57,10 @@ TO_EMAILS = [
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Auto-Bot", layout="wide")
+st.set_page_config(page_title="Nifty Angel+Dhan Bot", layout="wide")
 
 # ---------------------------
-# ANGEL LOGIN
+# 1. ANGEL ONE LOGIN
 # ---------------------------
 @st.cache_resource(ttl=3600)
 def angel_login():
@@ -57,11 +69,29 @@ def angel_login():
         totp = pyotp.TOTP(TOTP_TOKEN).now()
         data = obj.generateSession(CLIENT_ID, PIN, totp)
         if not data or not data.get("status"):
-            st.error(f"Login failed: {data.get('message') if data else 'No response'}")
+            st.error(f"Angel Login failed: {data.get('message') if data else 'No response'}")
             return None
         return obj
     except Exception as e:
         st.error(f"Angel login error: {e}")
+        return None
+
+# ---------------------------
+# 2. DHAN LOGIN
+# ---------------------------
+@st.cache_resource(ttl=3600)
+def dhan_login():
+    try:
+        dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+        # Verify connection by checking funds
+        funds = dhan.get_fund_limits()
+        if funds.get("status") == "success":
+            return dhan
+        else:
+            st.error(f"Dhan Login Failed. Check Token. Response: {funds}")
+            return None
+    except Exception as e:
+        st.error(f"Dhan Connection Error: {e}")
         return None
 
 # ---------------------------
@@ -81,11 +111,10 @@ def get_atm_strike(price):
     return round(price / 50) * 50
 
 # ---------------------------
-# EMAIL FUNCTION (UPDATED)
+# EMAIL FUNCTION
 # ---------------------------
 def send_email_notification(data, alert_type="ENTRY"):
     try:
-        # --- 1. ORDER PLACEMENT EMAIL ---
         if alert_type == "ORDER":
             subject = f"✅ ORDER PLACED: {data['Symbol']} (ID: {data['OrderID']})"
             body = f"""
@@ -101,11 +130,7 @@ def send_email_notification(data, alert_type="ENTRY"):
             TOTAL VAL   : {data['Total Amount']}
             TIME        : {data['Time']}
             ------------------------------------
-            
-            *Order successfully sent to Angel One.*
             """
-
-        # --- 2. STRATEGY ALERT EMAIL ---
         else:
             if "TARGET" in str(data['result']):
                 subject_prefix = "✅ TARGET HIT"
@@ -132,7 +157,6 @@ def send_email_notification(data, alert_type="ENTRY"):
             ------------------------------------
             """
 
-        # --- SENDING LOGIC ---
         msg = MIMEMultipart()
         msg['From'] = GMAIL_USER
         msg['To'] = ", ".join(TO_EMAILS)
@@ -150,10 +174,10 @@ def send_email_notification(data, alert_type="ENTRY"):
         return False
 
 # ---------------------------
-# SCRIP MASTER
+# SCRIP MASTERS (ANGEL & DHAN)
 # ---------------------------
 @st.cache_data(ttl=3600)
-def get_scrip_master_df():
+def get_angel_master_df():
     json_file = "OpenAPIScripMaster.json"
     if not os.path.exists(json_file) or os.path.getsize(json_file) == 0:
         url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -166,7 +190,20 @@ def get_scrip_master_df():
             return pd.DataFrame()
     return pd.read_json(json_file)
 
-def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_type):
+@st.cache_data(ttl=3600)
+def get_dhan_master_df():
+    try:
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        df = pd.read_csv(url, low_memory=False)
+        df.columns = df.columns.str.strip()
+        # Parse date for filtering efficiency
+        df["SEM_EXPIRY_DATE"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors='coerce').dt.date
+        return df
+    except Exception as e:
+        st.error(f"Error fetching Dhan Master: {e}")
+        return pd.DataFrame()
+
+def get_angel_token(df_master, symbol, expiry_date, strike, option_type):
     try:
         strike_val = float(strike) * 100
         suffix = option_type.upper()
@@ -180,7 +217,31 @@ def get_token_from_master_cached(df_master, symbol, expiry_date, strike, option_
         if not filtered.empty:
             return filtered.iloc[0]["token"]
         return None
+    except Exception:
+        return None
+
+def get_dhan_security_id(dhan_master, expiry_str, strike, option_type):
+    """
+    Converts Angel format Expiry (e.g. 30DEC2025) to Dhan format and finds Security ID
+    """
+    try:
+        target_date = datetime.strptime(expiry_str, "%d%b%Y").date()
+        
+        filtered = dhan_master[
+            (dhan_master["SEM_EXM_EXCH_ID"] == "NSE") &
+            (dhan_master["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
+            (dhan_master["SEM_TRADING_SYMBOL"].str.contains("NIFTY")) &
+            (~dhan_master["SEM_TRADING_SYMBOL"].str.contains("FINNIFTY")) &
+            (dhan_master["SEM_EXPIRY_DATE"] == target_date) &
+            (dhan_master["SEM_STRIKE_PRICE"] == float(strike)) &
+            (dhan_master["SEM_OPTION_TYPE"] == option_type)
+        ]
+
+        if not filtered.empty:
+            return str(filtered.iloc[0]["SEM_SMST_SECURITY_ID"])
+        return None
     except Exception as e:
+        print(f"Dhan Token Lookup Error: {e}")
         return None
 
 def get_symbol_from_token(df_master, token):
@@ -193,7 +254,7 @@ def get_symbol_from_token(df_master, token):
         return None
 
 # ---------------------------
-# ORDER PLACEMENT
+# ORDER PLACEMENT (ANGEL + DHAN)
 # ---------------------------
 def place_angel_order(api_obj, token, symbol, price):
     try:
@@ -212,11 +273,32 @@ def place_angel_order(api_obj, token, symbol, price):
         orderId = api_obj.placeOrder(orderparams)
         return orderId
     except Exception as e:
-        print(f"Order Placement Error: {e}")
+        print(f"Angel Order Error: {e}")
+        return False
+
+def place_dhan_order(dhan_obj, security_id, price):
+    try:
+        order = dhan_obj.place_order(
+            security_id=security_id,
+            exchange_segment="NSE_FNO",
+            transaction_type="BUY",
+            quantity=ORDER_QTY,
+            order_type="LIMIT",
+            product_type="INTRADAY",
+            price=float(price),
+            validity="DAY"
+        )
+        if order["status"] == "success":
+            return order["data"]["orderId"]
+        else:
+            print(f"Dhan Order Failed: {order}")
+            return False
+    except Exception as e:
+        print(f"Dhan Exec Error: {e}")
         return False
 
 # ---------------------------
-# DATA FETCHING
+# DATA FETCHING (ANGEL)
 # ---------------------------
 def fetch_ltp(api_obj, token, exchange="NSE"):
     try:
@@ -320,7 +402,6 @@ def add_custom_ema(df):
     df["alert_candle"] = df["above_ema_alert"] | df["below_ema_alert"]
     return df
 
-# --- PRECISE TIME FINDER ---
 def find_precise_event_time(api_obj, token, start_time_10min, threshold_price, condition="GT", exchange="NSE"):
     try:
         from_dt = start_time_10min
@@ -348,7 +429,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
     candidates = []
     
     for strike in strikes:
-        token = get_token_from_master_cached(master_df, "NIFTY", expiry_date, strike, signal_type)
+        token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=360)
@@ -505,7 +586,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                 # TARGET
                 if opt_row["high"] >= trade_entry["target"]:
                     if is_current_live_candle:
-                         exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
+                          exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
                     else:
                         precise_dt = find_precise_event_time(
                             api_obj, active_opt_token, curr_time, trade_entry["target"], 
@@ -575,8 +656,17 @@ def plot_strategy_with_trades(df, trades=None, title="Chart", extra_lines=None, 
 # MAIN APP
 # ---------------------------
 api = angel_login()
-if not api: st.stop()
-master_df = get_scrip_master_df()
+dhan_api = dhan_login() # DHAN Login
+
+if not api:
+    st.error("Angel One Login Failed. Stop.")
+    st.stop()
+if not dhan_api:
+    st.error("Dhan Login Failed. Stop.")
+    st.stop()
+
+master_df = get_angel_master_df()
+dhan_master_df = get_dhan_master_df()
 
 with st.sidebar:
     st.header("⚙️ Controls")
@@ -594,23 +684,8 @@ with st.sidebar:
         if send_email_notification({"Nature": "TEST - BUY CE", "Best Strike": 24500, "Signal Time": datetime.now(IST).strftime('%H:%M:%S'), "entry_price": 100, "target": 120, "SL": 80, "result": "TEST"}):
             st.success("Sent!")
         else: st.error("Failed")
-        
-    if st.button("Send Test Order Email"):
-        test_order_data = {
-            "Time": datetime.now(IST).strftime('%H:%M:%S'),
-            "Symbol": "NIFTY30DEC24500CE",
-            "Type": "BUY (LIMIT)",
-            "Qty": ORDER_QTY,
-            "Price": 150.50,
-            "Total Amount": ORDER_QTY * 150.50,
-            "OrderID": "TEST-12345678"
-        }
-        if send_email_notification(test_order_data, alert_type="ORDER"):
-            st.success("Sent Order Email!")
-        else:
-            st.error("Failed")
 
-st.title("🚀 Nifty Master Bot (Sequential)")
+st.title("🚀 Nifty Auto-Bot (Angel Data + Dhan Exec)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
@@ -715,7 +790,7 @@ def run_analysis_cycle():
                     op_type = "CE" if "CE" in t_data['Nature'] else "PE"
                     st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
                     
-                    token = get_token_from_master_cached(master_df, "NIFTY", expiry_str, strike, op_type)
+                    token = get_angel_token(master_df, "NIFTY", expiry_str, strike, op_type)
                     if token:
                         df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=360)
                         if not df_opt_chart.empty:
@@ -742,15 +817,33 @@ def run_analysis_cycle():
                     if is_fresh_event:
                         st.toast(f"New Entry: #{tid}", icon="🚀")
                         
-                        # --- PLACE ORDER LOGIC ---
-                        token = trade.get("token")
-                        if token:
-                            symbol_name = get_symbol_from_token(master_df, token)
+                        # --- PLACE ORDER LOGIC (DUAL) ---
+                        angel_token = trade.get("token")
+                        
+                        if angel_token:
+                            symbol_name = get_symbol_from_token(master_df, angel_token)
+                            
                             if symbol_name:
-                                order_id = place_angel_order(api, token, symbol_name, trade["entry_price"])
-                                if order_id:
-                                    st.toast(f"Order Placed! ID: {order_id}", icon="✅")
-                                    # Log to Order Book
+                                # 1. Place Angel Order
+                                angel_order_id = place_angel_order(api, angel_token, symbol_name, trade["entry_price"])
+                                
+                                # 2. Place Dhan Order
+                                dhan_id = get_dhan_security_id(dhan_master_df, expiry_str, trade["Best Strike"], trade["type"])
+                                dhan_order_id = "FAILED"
+                                
+                                if dhan_id:
+                                    dhan_resp = place_dhan_order(dhan_api, dhan_id, trade["entry_price"])
+                                    if dhan_resp:
+                                        dhan_order_id = dhan_resp
+                                        st.toast(f"Dhan Order Placed! ID: {dhan_resp}", icon="⚡")
+                                else:
+                                    st.error("Could not find Dhan Security ID for this strike")
+
+                                # 3. Logging
+                                if angel_order_id or dhan_order_id != "FAILED":
+                                    combined_id = f"A:{angel_order_id} | D:{dhan_order_id}"
+                                    st.toast(f"Orders Executed", icon="✅")
+                                    
                                     order_details = {
                                         "Time": datetime.now(IST).strftime('%H:%M:%S'),
                                         "Symbol": symbol_name,
@@ -758,14 +851,10 @@ def run_analysis_cycle():
                                         "Qty": ORDER_QTY,
                                         "Price": trade["entry_price"],
                                         "Total Amount": ORDER_QTY * trade["entry_price"],
-                                        "OrderID": order_id
+                                        "OrderID": combined_id
                                     }
                                     st.session_state["order_book"].append(order_details)
-                                    
-                                    # Send ORDER Email
                                     send_email_notification(order_details, alert_type="ORDER")
-                                else:
-                                    st.error("Failed to place order!")
                             else:
                                 st.error("Symbol Name not found for Token!")
                         
@@ -787,7 +876,7 @@ def run_analysis_cycle():
                         else:
                             st.session_state["trade_state"][tid] = current_result
             
-            # --- 2. DISPLAY ORDER BOOK (NEW TABLE) ---
+            # --- 2. DISPLAY ORDER BOOK ---
             if st.session_state["order_book"]:
                 st.write("### 📝 Order Book (Live Executions)")
                 st.dataframe(pd.DataFrame(st.session_state["order_book"]), use_container_width=True)
