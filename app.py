@@ -2,21 +2,20 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta, time as dtime
-from SmartApi import SmartConnect
-from dhanhq import dhanhq  # NEW IMPORT
+from dhanhq import dhanhq
 import requests
 import os
-import pyotp
 import time
 import pytz
 import smtplib
 import math
 import ssl
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ---------------------------
-# SSL CONTEXT (For Dhan CSV)
+# SSL CONTEXT
 # ---------------------------
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -28,62 +27,32 @@ IST = pytz.timezone("Asia/Kolkata")
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-# --- ANGEL ONE CREDENTIALS ---
-API_KEY = "WM6i3ikL"
-CLIENT_ID = "AABY364105"
-PIN = "6954"
-TOTP_TOKEN = "D5PMGU3B674K4YFIQNE7CKDUSU"
-NIFTY_TOKEN = "99926000"
+# --- DHAN CREDENTIALS ---
 
-# --- DHAN CREDENTIALS (REPLACE THESE) ---
 DHAN_CLIENT_ID = "2512259667"   # e.g., "1100087829"
 DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY2NzQ0MTc4LCJpYXQiOjE3NjY2NTc3NzgsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwMDg3ODI5In0.GAaZBKkdn6Fay6OOQQiMdIhIbV6d5tZsBfQCLMdHgg4EkAjTFKeIPCJPb1J7LXp0gc78ryOPahH8EbyAnXYnYQ" # Long JWT string
 
 
-# STRATEGY SETTINGS
+# --- STRATEGY SETTINGS ---
+NIFTY_SECURITY_ID = "13"  # Fixed ID for Nifty 50 Index on Dhan (NSE)
 MIN_OPT_PRICE = 142
 MAX_OPT_PRICE = 195
 ORDER_QTY = 75  # Fixed Quantity (1 Lot)
 
-# ---------------------------
-# EMAIL CONFIGURATION
-# ---------------------------
+# --- EMAIL CONFIGURATION ---
 GMAIL_USER = "akhils8493@gmail.com"
 GMAIL_PASSWORD = "tptr wtof dhkb jtht" 
+TO_EMAILS = ["akhils8493@gmail.com", "shauryamraghaw@gmail.com", "kamal.padha99@gmail.com"]
 
-TO_EMAILS = [
-    "akhils8493@gmail.com",
-    "shauryamraghaw@gmail.com",
-    "kamal.padha99@gmail.com"
-]
-
-st.set_page_config(page_title="Nifty Angel+Dhan Bot", layout="wide")
+st.set_page_config(page_title="Nifty Dhan Bot (Full Power)", layout="wide")
 
 # ---------------------------
-# 1. ANGEL ONE LOGIN
-# ---------------------------
-@st.cache_resource(ttl=3600)
-def angel_login():
-    try:
-        obj = SmartConnect(api_key=API_KEY)
-        totp = pyotp.TOTP(TOTP_TOKEN).now()
-        data = obj.generateSession(CLIENT_ID, PIN, totp)
-        if not data or not data.get("status"):
-            st.error(f"Angel Login failed: {data.get('message') if data else 'No response'}")
-            return None
-        return obj
-    except Exception as e:
-        st.error(f"Angel login error: {e}")
-        return None
-
-# ---------------------------
-# 2. DHAN LOGIN
+# 1. DHAN LOGIN (EXECUTION)
 # ---------------------------
 @st.cache_resource(ttl=3600)
 def dhan_login():
     try:
         dhan = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
-        # Verify connection by checking funds
         funds = dhan.get_fund_limits()
         if funds.get("status") == "success":
             return dhan
@@ -102,7 +71,6 @@ def get_next_tuesday(date=None):
         date = datetime.now(IST).date()
     elif isinstance(date, pd.Timestamp):
         date = date.date()
-    
     days_ahead = (1 - date.weekday()) % 7
     next_tues = date + timedelta(days=days_ahead)
     return next_tues.strftime("%d%b%Y").upper()
@@ -119,7 +87,6 @@ def send_email_notification(data, alert_type="ENTRY"):
             subject = f"✅ ORDER PLACED: {data['Symbol']} (ID: {data['OrderID']})"
             body = f"""
             🚀 ORDER EXECUTION REPORT
-            
             ------------------------------------
             SYMBOL      : {data['Symbol']}
             ORDER ID    : {data['OrderID']}
@@ -127,27 +94,17 @@ def send_email_notification(data, alert_type="ENTRY"):
             TYPE        : {data['Type']}
             QUANTITY    : {data['Qty']}
             PRICE       : {data['Price']}
-            TOTAL VAL   : {data['Total Amount']}
             TIME        : {data['Time']}
             ------------------------------------
             """
         else:
-            if "TARGET" in str(data['result']):
-                subject_prefix = "✅ TARGET HIT"
-            elif "SL" in str(data['result']):
-                subject_prefix = "🔴 SL HIT"
-            else:
-                subject_prefix = "🚀 NEW SIGNAL"
-
+            subject_prefix = "✅ TARGET HIT" if "TARGET" in str(data['result']) else ("🔴 SL HIT" if "SL" in str(data['result']) else "🚀 NEW SIGNAL")
             time_display = data.get('Signal Time', datetime.now(IST).strftime('%H:%M:%S'))
             subject = f"{subject_prefix}: {data['Nature']} @ {data['entry_price']}"
-            
             body = f"""
             🔔 STRATEGY ALERT: {subject_prefix}
-            
             ------------------------------------
             STATUS      : {data['result']}
-            ------------------------------------
             TYPE        : {data['Nature']}
             STRIKE      : {data['Best Strike']}
             ENTRY PRICE : {data['entry_price']}
@@ -174,59 +131,23 @@ def send_email_notification(data, alert_type="ENTRY"):
         return False
 
 # ---------------------------
-# SCRIP MASTERS (ANGEL & DHAN)
+# SCRIP MASTER (DHAN ONLY)
 # ---------------------------
-@st.cache_data(ttl=3600)
-def get_angel_master_df():
-    json_file = "OpenAPIScripMaster.json"
-    if not os.path.exists(json_file) or os.path.getsize(json_file) == 0:
-        url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
-        try:
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            with open(json_file, "wb") as f:
-                f.write(r.content)
-        except Exception:
-            return pd.DataFrame()
-    return pd.read_json(json_file)
-
 @st.cache_data(ttl=3600)
 def get_dhan_master_df():
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         df = pd.read_csv(url, low_memory=False)
         df.columns = df.columns.str.strip()
-        # Parse date for filtering efficiency
         df["SEM_EXPIRY_DATE"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors='coerce').dt.date
         return df
     except Exception as e:
         st.error(f"Error fetching Dhan Master: {e}")
         return pd.DataFrame()
 
-def get_angel_token(df_master, symbol, expiry_date, strike, option_type):
-    try:
-        strike_val = float(strike) * 100
-        suffix = option_type.upper()
-        filtered = df_master[
-            (df_master["exch_seg"] == "NFO") &
-            (df_master["name"] == symbol) &
-            (df_master["expiry"] == expiry_date) &
-            (df_master["symbol"].str.endswith(suffix)) &
-            (pd.to_numeric(df_master["strike"], errors="coerce") == strike_val)
-        ]
-        if not filtered.empty:
-            return filtered.iloc[0]["token"]
-        return None
-    except Exception:
-        return None
-
 def get_dhan_security_id(dhan_master, expiry_str, strike, option_type):
-    """
-    Converts Angel format Expiry (e.g. 30DEC2025) to Dhan format and finds Security ID
-    """
     try:
         target_date = datetime.strptime(expiry_str, "%d%b%Y").date()
-        
         filtered = dhan_master[
             (dhan_master["SEM_EXM_EXCH_ID"] == "NSE") &
             (dhan_master["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
@@ -236,139 +157,173 @@ def get_dhan_security_id(dhan_master, expiry_str, strike, option_type):
             (dhan_master["SEM_STRIKE_PRICE"] == float(strike)) &
             (dhan_master["SEM_OPTION_TYPE"] == option_type)
         ]
-
         if not filtered.empty:
             return str(filtered.iloc[0]["SEM_SMST_SECURITY_ID"])
         return None
     except Exception as e:
-        print(f"Dhan Token Lookup Error: {e}")
         return None
 
-def get_symbol_from_token(df_master, token):
+def get_symbol_from_id(dhan_master, security_id):
     try:
-        row = df_master[df_master['token'] == str(token)]
+        row = dhan_master[dhan_master['SEM_SMST_SECURITY_ID'] == int(security_id)]
         if not row.empty:
-            return row.iloc[0]['symbol']
-        return None
+            return row.iloc[0]['SEM_TRADING_SYMBOL']
+        return security_id
     except:
-        return None
+        return security_id
 
 # ---------------------------
-# ORDER PLACEMENT (ANGEL + DHAN)
+# DATA FETCHING (VIA DHAN API DIRECTLY)
 # ---------------------------
-def place_angel_order(api_obj, token, symbol, price):
+def fetch_dhan_candle_data(security_id, interval_str, specific_date=None, days_back=5, is_index=False):
+    """
+    Fetches candle data using Dhan v2/charts/intraday API.
+    Replaces Angel One fetching logic completely.
+    """
     try:
-        orderparams = {
-            "variety": "NORMAL",
-            "tradingsymbol": symbol,
-            "symboltoken": str(token),
-            "transactiontype": "BUY",
-            "exchange": "NFO",
-            "ordertype": "LIMIT",
-            "producttype": "INTRADAY",
-            "duration": "DAY",
-            "price": str(price),
-            "quantity": str(ORDER_QTY)
+        # 1. Map Interval String to Dhan Code
+        # Dhan Codes: 1, 5, 10, 15, 30, 60, etc.
+        interval_map = {
+            "ONE_MINUTE": "1",
+            "FIVE_MINUTE": "5",
+            "TEN_MINUTE": "10",  # Used by your strategy
+            "FIFTEEN_MINUTE": "15"
         }
-        orderId = api_obj.placeOrder(orderparams)
-        return orderId
-    except Exception as e:
-        print(f"Angel Order Error: {e}")
-        return False
+        interval_code = interval_map.get(interval_str, "10")
 
-def place_dhan_order(dhan_obj, security_id, price):
-    try:
-        order = dhan_obj.place_order(
-            security_id=security_id,
-            exchange_segment="NSE_FNO",
-            transaction_type="BUY",
-            quantity=ORDER_QTY,
-            order_type="LIMIT",
-            product_type="INTRADAY",
-            price=float(price),
-            validity="DAY"
-        )
-        if order["status"] == "success":
-            return order["data"]["orderId"]
+        # 2. Determine Segment & Instrument
+        # If ID is 13 (Nifty), it's Index. Else it's Option.
+        if is_index or security_id == "13":
+            exchange_segment = "IDX_I"
+            instrument = "INDEX"
         else:
-            print(f"Dhan Order Failed: {order}")
-            return False
-    except Exception as e:
-        print(f"Dhan Exec Error: {e}")
-        return False
+            exchange_segment = "NSE_FNO"
+            instrument = "OPTIDX"
 
-# ---------------------------
-# DATA FETCHING (ANGEL)
-# ---------------------------
-def fetch_ltp(api_obj, token, exchange="NSE"):
-    try:
-        data = api_obj.ltpData(exchange, token, token)
-        if data and data.get("status"):
-             return float(data["data"]["ltp"])
-    except:
-        pass
-    return None
-
-def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=60, custom_from=None, custom_to=None):
-    try:
-        if custom_from and custom_to:
-            from_dt = custom_from
-            to_dt = custom_to
+        # 3. Calculate Date Range
+        now_ist = datetime.now(IST)
+        if specific_date:
+            to_date_obj = datetime.combine(specific_date, dtime(23, 59))
         else:
-            now_ist = datetime.now(IST)
-            target_date = specific_date if specific_date else now_ist.date()
+            to_date_obj = now_ist
 
-            if target_date == now_ist.date():
-                to_dt = now_ist
-            else:
-                to_dt = datetime.combine(target_date, dtime(15, 30))
-                to_dt = IST.localize(to_dt)
-
-            from_dt = to_dt - timedelta(days=days_back)
-            from_dt = from_dt.replace(hour=9, minute=15)
-
-        params = {
-            "exchange": exchange, 
-            "symboltoken": str(token), 
-            "interval": interval,
-            "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"), 
-            "todate": to_dt.strftime("%Y-%m-%d %H:%M")
-        }
+        from_date_obj = to_date_obj - timedelta(days=days_back)
         
-        for attempt in range(3):
-            try:
-                time.sleep(0.1) 
-                resp = api_obj.getCandleData(params)
-                if resp and resp.get("status") and resp.get("data"):
-                    data = resp.get("data", [])
-                    cols = ["datetime", "open", "high", "low", "close", "volume"]
-                    df = pd.DataFrame(data, columns=cols)
-                    
-                    df["datetime"] = pd.to_datetime(df["datetime"])
-                    if df["datetime"].dt.tz is not None:
-                        df["datetime"] = df["datetime"].dt.tz_localize(None)
-                    
-                    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].apply(pd.to_numeric)
-                    return df
-                time.sleep(0.3)
-            except:
-                time.sleep(0.5)
-        return pd.DataFrame()
-    except:
+        # Dhan expects YYYY-MM-DD
+        from_date_str = from_date_obj.strftime("%Y-%m-%d")
+        to_date_str = to_date_obj.strftime("%Y-%m-%d")
+
+        # 4. API Request Construction
+        url = "https://api.dhan.co/v2/charts/intraday"
+        headers = {
+            "access-token": DHAN_ACCESS_TOKEN,
+            "client-id": DHAN_CLIENT_ID,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "securityId": str(security_id),
+            "exchangeSegment": exchange_segment,
+            "instrument": instrument,
+            "interval": interval_code,
+            "fromDate": from_date_str,
+            "toDate": to_date_str
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        
+        if response.status_code != 200:
+            return pd.DataFrame()
+
+        data_json = response.json()
+        
+        # 5. Parse Dhan Response to Pandas DataFrame
+        # Dhan often returns data in 'data' key or directly. 
+        # Structure usually: { "open": [...], "high": [...], "start_Time": [...] } (TradingView style)
+        
+        raw_data = data_json.get("data", {})
+        if not raw_data:
+            return pd.DataFrame()
+
+        # Check if keys exist
+        if "start_Time" not in raw_data:
+             return pd.DataFrame()
+
+        # Create DataFrame
+        df = pd.DataFrame({
+            "datetime": raw_data["start_Time"],
+            "open": raw_data["open"],
+            "high": raw_data["high"],
+            "low": raw_data["low"],
+            "close": raw_data["close"],
+            "volume": raw_data.get("volume", [0]*len(raw_data["close"]))
+        })
+
+        # 6. Convert Dhan's Epoch Time/String to datetime objects
+        # Dhan usually sends "start_Time" as an integer (epoch/dhan time format) or similar.
+        # Assuming Dhan sends Dhan-Time (requires conversion) or Epoch.
+        # Standard Dhan Intraday returns integers.
+        
+        # Logic: Dhan time is often epoch * 1000 or custom. 
+        # If numbers seem like 1.6 Billion, it's epoch. 
+        # Actually Dhan v2 charts often return integer timestamp.
+        
+        if not df.empty:
+            # Convert numeric timestamp to datetime
+            # Dhan timestamps are usually standard epoch (seconds) or milliseconds
+            # We assume standard numeric conversion first
+            first_ts = df["datetime"].iloc[0]
+            
+            # Heuristic: If timestamp > 10000000000 (11 digits), it's milliseconds
+            unit = 'ms' if first_ts > 10000000000 else 's'
+            df["datetime"] = pd.to_datetime(df["datetime"], unit=unit)
+            
+            # Localize to IST if naive, convert if aware
+            if df["datetime"].dt.tz is None:
+                df["datetime"] = df["datetime"].dt.tz_localize("UTC").dt.tz_convert(IST)
+            else:
+                df["datetime"] = df["datetime"].dt.tz_convert(IST)
+
+            # Remove timezone info for simpler internal logic (make naive IST)
+            df["datetime"] = df["datetime"].dt.tz_localize(None)
+
+            # Cast floats
+            cols = ["open", "high", "low", "close", "volume"]
+            df[cols] = df[cols].apply(pd.to_numeric)
+            
+            return df
+
+    except Exception as e:
+        print(f"Dhan Fetch Error: {e}")
         return pd.DataFrame()
 
-def inject_live_ltp(df, api_obj, token, exchange="NSE"):
+    return pd.DataFrame()
+
+def inject_live_ltp(df, dhan_obj, security_id, exchange_segment="NSE_FNO"):
+    """
+    Simulates live candle update using Dhan's LTP.
+    """
     if df.empty: return df
     
     now_ist = datetime.now(IST)
     if now_ist.time() >= dtime(15, 30): return df 
     
-    ltp = fetch_ltp(api_obj, token, exchange)
-    if ltp is None: return df 
-    
-    last_dt = df.iloc[-1]["datetime"].replace(tzinfo=None)
+    # Get LTP from Dhan
+    try:
+        # Determine exchange segment object for library
+        exch = dhan_obj.NSE if exchange_segment == "IDX_I" else dhan_obj.FNO
+        ltp_data = dhan_obj.get_ltp(security_id, exch)
+        
+        if ltp_data['status'] == 'success':
+            ltp = float(ltp_data['data']['last_price'])
+        else:
+            return df
+    except:
+        return df
+
+    last_dt = df.iloc[-1]["datetime"]
     now_naive = now_ist.replace(microsecond=0, tzinfo=None)
     
+    # Logic for 10-min candle update
     minute_block = (now_naive.minute // 10) * 10
     current_candle_start = now_naive.replace(minute=minute_block, second=0)
     
@@ -385,6 +340,30 @@ def inject_live_ltp(df, api_obj, token, exchange="NSE"):
     return df
 
 # ---------------------------
+# ORDER PLACEMENT (DHAN)
+# ---------------------------
+def place_dhan_order(dhan_obj, security_id, price):
+    try:
+        order = dhan_obj.place_order(
+            security_id=str(security_id),
+            exchange_segment=dhan_obj.FNO,
+            transaction_type=dhan_obj.BUY,
+            quantity=ORDER_QTY,
+            order_type=dhan_obj.LIMIT,
+            product_type=dhan_obj.INTRADAY,
+            price=float(price),
+            validity=dhan_obj.DAY
+        )
+        if order["status"] == "success":
+            return order["data"]["orderId"]
+        else:
+            print(f"Dhan Order Failed: {order}")
+            return False
+    except Exception as e:
+        print(f"Dhan Exec Error: {e}")
+        return False
+
+# ---------------------------
 # INDICATORS & LOGIC (BUFFERED)
 # ---------------------------
 def add_custom_ema(df):
@@ -396,46 +375,48 @@ def add_custom_ema(df):
     df["body_bottom"] = df[["open", "close"]].min(axis=1)
 
     buffer = 2.0 
-
     df["above_ema_alert"] = df["body_bottom"] > (df["ema_3_smooth"] + buffer)
     df["below_ema_alert"] = df["body_top"] < (df["ema_3_smooth"] - buffer)
     df["alert_candle"] = df["above_ema_alert"] | df["below_ema_alert"]
     return df
 
-def find_precise_event_time(api_obj, token, start_time_10min, threshold_price, condition="GT", exchange="NSE"):
+def find_precise_event_time(security_id, start_time_10min, threshold_price, condition="GT"):
+    # Using 1-min data to find precise cross
     try:
+        df_1min = fetch_dhan_candle_data(security_id, "ONE_MINUTE", specific_date=start_time_10min.date(), days_back=1, is_index=False)
+        
+        # Filter for the specific 10 min window
         from_dt = start_time_10min
         to_dt = start_time_10min + timedelta(minutes=10)
         
-        df_1min = fetch_candle_data(api_obj, token, "ONE_MINUTE", exchange=exchange, custom_from=from_dt, custom_to=to_dt)
+        mask = (df_1min['datetime'] >= from_dt) & (df_1min['datetime'] < to_dt)
+        df_window = df_1min.loc[mask]
         
-        if df_1min.empty:
-            return start_time_10min 
+        if df_window.empty: return start_time_10min 
             
-        for _, row in df_1min.iterrows():
+        for _, row in df_window.iterrows():
             if condition == "GT":
-                if row['high'] >= threshold_price: 
-                    return row['datetime'] 
+                if row['high'] >= threshold_price: return row['datetime'] 
             elif condition == "LT":
-                if row['low'] <= threshold_price: 
-                    return row['datetime']
+                if row['low'] <= threshold_price: return row['datetime']
         return start_time_10min 
     except:
         return start_time_10min
 
-def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, signal_type, spot_price, trade_date):
+def validate_signal_with_options(dhan_obj, master_df, expiry_date, signal_time, signal_type, spot_price, trade_date):
     atm = get_atm_strike(spot_price)
     strikes = [atm + (i * 50) for i in range(-5, 6)]
     candidates = []
     
     for strike in strikes:
-        token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
-        if not token: continue
+        sec_id = get_dhan_security_id(master_df, expiry_date, strike, signal_type)
+        if not sec_id: continue
             
-        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
+        # Fetch Option Data from Dhan
+        df_opt = fetch_dhan_candle_data(sec_id, "TEN_MINUTE", specific_date=trade_date, days_back=5, is_index=False)
         
         if trade_date == datetime.now(IST).date():
-            df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
+            df_opt = inject_live_ltp(df_opt, dhan_obj, sec_id, exchange_segment="NSE_FNO")
             
         if df_opt.empty: continue
         df_opt = add_custom_ema(df_opt)
@@ -456,23 +437,23 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
             
         if df_opt_today.iloc[idx + 1]["high"] > entry_price:
             candidates.append({
-                "strike": strike, "diff": abs(entry_price - 150), "df": df_opt_today, "token": token
+                "strike": strike, "diff": abs(entry_price - 150), "df": df_opt_today, "security_id": sec_id
             })
             
     if candidates:
         candidates.sort(key=lambda x: x["diff"])
         best = candidates[0]
-        return True, best["strike"], best["df"], best["token"]
+        return True, best["strike"], best["df"], best["security_id"]
     return False, None, None, None
 
-def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date, is_live_mode=False):
+def sequential_trades_with_validation(df, dhan_obj, master_df, expiry_date, trade_date, is_live_mode=False):
     trades = []
     trade_open = False
     trade_entry = {} 
     trade_count = 0
     last_trade_type = None 
     active_opt_df = None 
-    active_opt_token = None 
+    active_opt_id = None 
     
     for idx in range(len(df) - 1):
         if trade_count >= 2: break
@@ -489,8 +470,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                 if last_trade_type != "PE":
                     if df.loc[entry_idx, "low"] < df.loc[idx, "low"]:
                         
-                        is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
-                            api_obj, master_df, expiry_date, curr_time, "PE", df.loc[idx, "open"], trade_date)
+                        is_valid, best_strike, opt_df, opt_id = validate_signal_with_options(
+                            dhan_obj, master_df, expiry_date, curr_time, "PE", df.loc[idx, "open"], trade_date)
                         
                         if is_valid:
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
@@ -501,18 +482,14 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             if is_current_live_candle:
                                 display_time = datetime.now(IST).strftime('%H:%M:%S')
                             else:
-                                precise_dt = find_precise_event_time(
-                                    api_obj, opt_token, entry_candle_time, opt_entry_price, 
-                                    condition="GT", exchange="NFO"
-                                )
+                                precise_dt = find_precise_event_time(opt_id, entry_candle_time, opt_entry_price, condition="GT")
                                 display_time = precise_dt.strftime('%H:%M')
                             
                             trade_open = True
                             last_trade_type = "PE"
                             active_opt_df = opt_df
-                            active_opt_token = opt_token
+                            active_opt_id = opt_id
                             
-                            # --- CALCULATIONS ---
                             raw_sl_val = opt_alert_row["low"] 
                             if opt_entry_row["low"] < raw_sl_val: 
                                 raw_sl_val = opt_entry_row["low"]
@@ -528,7 +505,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "Signal Close": df.loc[idx, "close"], "type": "PE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
-                                "token": opt_token
+                                "security_id": opt_id
                             }
 
             # BUY CE
@@ -536,8 +513,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                 if last_trade_type != "CE":
                     if df.loc[entry_idx, "high"] > df.loc[idx, "high"]:
                         
-                        is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
-                            api_obj, master_df, expiry_date, curr_time, "CE", df.loc[idx, "open"], trade_date)
+                        is_valid, best_strike, opt_df, opt_id = validate_signal_with_options(
+                            dhan_obj, master_df, expiry_date, curr_time, "CE", df.loc[idx, "open"], trade_date)
                         
                         if is_valid:
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
@@ -548,18 +525,14 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                             if is_current_live_candle:
                                 display_time = datetime.now(IST).strftime('%H:%M:%S')
                             else:
-                                precise_dt = find_precise_event_time(
-                                    api_obj, opt_token, entry_candle_time, opt_entry_price, 
-                                    condition="GT", exchange="NFO"
-                                )
+                                precise_dt = find_precise_event_time(opt_id, entry_candle_time, opt_entry_price, condition="GT")
                                 display_time = precise_dt.strftime('%H:%M')
 
                             trade_open = True
                             last_trade_type = "CE"
                             active_opt_df = opt_df
-                            active_opt_token = opt_token
+                            active_opt_id = opt_id
 
-                            # --- CALCULATIONS ---
                             raw_sl_val = opt_alert_row["low"] 
                             if opt_entry_row["low"] < raw_sl_val: 
                                 raw_sl_val = opt_entry_row["low"]
@@ -575,7 +548,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                                 "Signal Close": df.loc[idx, "close"], "type": "CE", "entry_time": entry_candle_time,
                                 "entry_price": opt_entry_price, "SL": final_sl, "target": final_target,
                                 "result": "OPEN ⏳", "Best Strike": best_strike, "SL Time": "-", "Target Time": "-",
-                                "token": opt_token
+                                "security_id": opt_id
                             }
 
         elif trade_open and active_opt_df is not None:
@@ -588,10 +561,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                     if is_current_live_candle:
                           exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
                     else:
-                        precise_dt = find_precise_event_time(
-                            api_obj, active_opt_token, curr_time, trade_entry["target"], 
-                            condition="GT", exchange="NFO"
-                        )
+                        precise_dt = find_precise_event_time(active_opt_id, curr_time, trade_entry["target"], condition="GT")
                         exit_display_time = precise_dt.strftime('%H:%M')
 
                     trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["target"], "result": "TARGET 🟢", "Target Time": exit_display_time})
@@ -611,10 +581,7 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                         if is_current_live_candle:
                             exit_display_time = datetime.now(IST).strftime('%H:%M:%S')
                         else:
-                            precise_dt = find_precise_event_time(
-                                api_obj, active_opt_token, curr_time, trade_entry["SL"], 
-                                condition="LT", exchange="NFO"
-                            )
+                            precise_dt = find_precise_event_time(active_opt_id, curr_time, trade_entry["SL"], condition="LT")
                             exit_display_time = precise_dt.strftime('%H:%M')
 
                         trade_entry.update({"exit_time": curr_time, "exit_price": trade_entry["SL"], "result": "SL 🔴", "SL Time": exit_display_time})
@@ -655,17 +622,12 @@ def plot_strategy_with_trades(df, trades=None, title="Chart", extra_lines=None, 
 # ---------------------------
 # MAIN APP
 # ---------------------------
-api = angel_login()
-dhan_api = dhan_login() # DHAN Login
+dhan_api = dhan_login()
 
-if not api:
-    st.error("Angel One Login Failed. Stop.")
-    st.stop()
 if not dhan_api:
     st.error("Dhan Login Failed. Stop.")
     st.stop()
 
-master_df = get_angel_master_df()
 dhan_master_df = get_dhan_master_df()
 
 with st.sidebar:
@@ -676,16 +638,14 @@ with st.sidebar:
     expiry_str = st.text_input("Expiry", value=get_next_tuesday(chosen_date))
     
     st.caption(f"🗓️ Using Expiry: **{expiry_str}**")
-    
     refresh_rate = st.slider("Auto-Refresh (Sec)", 1, 60, 2)
-
     st.divider()
     if st.button("Send Test Alert"):
         if send_email_notification({"Nature": "TEST - BUY CE", "Best Strike": 24500, "Signal Time": datetime.now(IST).strftime('%H:%M:%S'), "entry_price": 100, "target": 120, "SL": 80, "result": "TEST"}):
             st.success("Sent!")
         else: st.error("Failed")
 
-st.title("🚀 Nifty Auto-Bot (Angel Data + Dhan Exec)")
+st.title("🚀 Nifty Dhan Bot (Full Power)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
@@ -693,14 +653,9 @@ order_table = st.empty()
 analyzer_section = st.empty()
 
 # --- INITIALIZE SESSION STATE ---
-if "trade_state" not in st.session_state:
-    st.session_state["trade_state"] = {}
-
-if "session_trades" not in st.session_state:
-    st.session_state["session_trades"] = []
-
-if "order_book" not in st.session_state:
-    st.session_state["order_book"] = []
+if "trade_state" not in st.session_state: st.session_state["trade_state"] = {}
+if "session_trades" not in st.session_state: st.session_state["session_trades"] = []
+if "order_book" not in st.session_state: st.session_state["order_book"] = []
 
 # ---------------------------
 # CORE STATE CHECK & RUN LOGIC
@@ -710,30 +665,28 @@ def is_recent(timestamp_str, limit_minutes=15):
         now = datetime.now(IST)
         has_seconds = len(timestamp_str.split(':')) == 3
         fmt = '%H:%M:%S' if has_seconds else '%H:%M'
-        
         event_time = datetime.strptime(timestamp_str, fmt).time()
         event_dt = datetime.combine(now.date(), event_time)
-        event_dt = IST.localize(event_dt) 
-        
+        event_dt = IST.localize(event_dt)
         diff = now - event_dt
         return diff < timedelta(minutes=limit_minutes) and diff >= timedelta(seconds=0)
     except:
         return True 
 
 def run_analysis_cycle():
-    df_long = fetch_candle_data(
-        api, 
-        NIFTY_TOKEN, 
+    # 1. Fetch NIFTY Spot Data (Using NIFTY_SECURITY_ID = 13)
+    df_long = fetch_dhan_candle_data(
+        NIFTY_SECURITY_ID, 
         "TEN_MINUTE", 
-        exchange="NSE", 
         specific_date=chosen_date, 
-        days_back=60 
+        days_back=60, 
+        is_index=True
     )
     
     is_live = False
     
     if mode == "🔴 LIVE MARKET":
-        df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
+        df_long = inject_live_ltp(df_long, dhan_api, NIFTY_SECURITY_ID, exchange_segment="IDX_I")
         is_live = True
 
     if df_long.empty:
@@ -749,7 +702,8 @@ def run_analysis_cycle():
         main_chart.warning(f"⚠️ No Data for Today. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
         return
     
-    current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
+    # 2. Run Strategy (Passing dhan_api and security_id logic)
+    current_trades = sequential_trades_with_validation(df_today, dhan_api, dhan_master_df, expiry_str, chosen_date, is_live_mode=is_live)
     
     # --- SAFETY CHECK: State Continuity ---
     should_update = True
@@ -774,7 +728,7 @@ def run_analysis_cycle():
     
     trades_to_display = st.session_state["session_trades"]
 
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
+    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY 50 (Dhan) - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
     
     if trades_to_display:
         df_display = pd.DataFrame(trades_to_display)
@@ -790,9 +744,10 @@ def run_analysis_cycle():
                     op_type = "CE" if "CE" in t_data['Nature'] else "PE"
                     st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
                     
-                    token = get_angel_token(master_df, "NIFTY", expiry_str, strike, op_type)
-                    if token:
-                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=60)
+                    sec_id = t_data.get("security_id")
+                    
+                    if sec_id:
+                        df_opt_chart = fetch_dhan_candle_data(sec_id, "TEN_MINUTE", specific_date=chosen_date, days_back=60, is_index=False)
                         if not df_opt_chart.empty:
                             df_opt_chart = add_custom_ema(df_opt_chart)
                             df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
@@ -817,46 +772,33 @@ def run_analysis_cycle():
                     if is_fresh_event:
                         st.toast(f"New Entry: #{tid}", icon="🚀")
                         
-                        # --- PLACE ORDER LOGIC (DUAL) ---
-                        angel_token = trade.get("token")
+                        # --- PLACE ORDER LOGIC (DHAN) ---
+                        dhan_sec_id = trade.get("security_id")
                         
-                        if angel_token:
-                            symbol_name = get_symbol_from_token(master_df, angel_token)
+                        if dhan_sec_id:
+                            symbol_name = get_symbol_from_id(dhan_master_df, dhan_sec_id)
                             
-                            if symbol_name:
-                                # 1. Place Angel Order
-                                angel_order_id = place_angel_order(api, angel_token, symbol_name, trade["entry_price"])
+                            # Place Dhan Order
+                            dhan_order_id = place_dhan_order(dhan_api, dhan_sec_id, trade["entry_price"])
+                            
+                            if dhan_order_id:
+                                st.toast(f"Dhan Order Executed! ID: {dhan_order_id}", icon="✅")
                                 
-                                # 2. Place Dhan Order
-                                dhan_id = get_dhan_security_id(dhan_master_df, expiry_str, trade["Best Strike"], trade["type"])
-                                dhan_order_id = "FAILED"
-                                
-                                if dhan_id:
-                                    dhan_resp = place_dhan_order(dhan_api, dhan_id, trade["entry_price"])
-                                    if dhan_resp:
-                                        dhan_order_id = dhan_resp
-                                        st.toast(f"Dhan Order Placed! ID: {dhan_resp}", icon="⚡")
-                                else:
-                                    st.error("Could not find Dhan Security ID for this strike")
-
-                                # 3. Logging
-                                if angel_order_id or dhan_order_id != "FAILED":
-                                    combined_id = f"A:{angel_order_id} | D:{dhan_order_id}"
-                                    st.toast(f"Orders Executed", icon="✅")
-                                    
-                                    order_details = {
-                                        "Time": datetime.now(IST).strftime('%H:%M:%S'),
-                                        "Symbol": symbol_name,
-                                        "Type": "BUY (LIMIT)",
-                                        "Qty": ORDER_QTY,
-                                        "Price": trade["entry_price"],
-                                        "Total Amount": ORDER_QTY * trade["entry_price"],
-                                        "OrderID": combined_id
-                                    }
-                                    st.session_state["order_book"].append(order_details)
-                                    send_email_notification(order_details, alert_type="ORDER")
+                                order_details = {
+                                    "Time": datetime.now(IST).strftime('%H:%M:%S'),
+                                    "Symbol": symbol_name,
+                                    "Type": "BUY (LIMIT)",
+                                    "Qty": ORDER_QTY,
+                                    "Price": trade["entry_price"],
+                                    "Total Amount": ORDER_QTY * trade["entry_price"],
+                                    "OrderID": f"Dhan:{dhan_order_id}"
+                                }
+                                st.session_state["order_book"].append(order_details)
+                                send_email_notification(order_details, alert_type="ORDER")
                             else:
-                                st.error("Symbol Name not found for Token!")
+                                st.error("Dhan Execution Failed")
+                        else:
+                            st.error("Security ID missing!")
                         
                         # Send STRATEGY Email
                         if send_email_notification(trade, alert_type="ENTRY"):
