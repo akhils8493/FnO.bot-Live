@@ -432,7 +432,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
-        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=60)
+        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
@@ -727,7 +727,7 @@ def run_analysis_cycle():
         "TEN_MINUTE", 
         exchange="NSE", 
         specific_date=chosen_date, 
-        days_back=60 
+        days_back=10 
     )
     
     is_live = False
