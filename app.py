@@ -309,7 +309,7 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
         pass
     return None
 
-def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=360, custom_from=None, custom_to=None):
+def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=60, custom_from=None, custom_to=None):
     try:
         if custom_from and custom_to:
             from_dt = custom_from
@@ -432,7 +432,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
-        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=360)
+        df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=60)
         
         if trade_date == datetime.now(IST).date():
             df_opt = inject_live_ltp(df_opt, api_obj, token, exchange="NFO")
@@ -727,7 +727,7 @@ def run_analysis_cycle():
         "TEN_MINUTE", 
         exchange="NSE", 
         specific_date=chosen_date, 
-        days_back=360 
+        days_back=60 
     )
     
     is_live = False
@@ -792,7 +792,7 @@ def run_analysis_cycle():
                     
                     token = get_angel_token(master_df, "NIFTY", expiry_str, strike, op_type)
                     if token:
-                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=360)
+                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=60)
                         if not df_opt_chart.empty:
                             df_opt_chart = add_custom_ema(df_opt_chart)
                             df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
