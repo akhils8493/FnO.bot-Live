@@ -309,7 +309,7 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
         pass
     return None
 
-def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=10, custom_from=None, custom_to=None):
+def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=60, custom_from=None, custom_to=None):
     try:
         if custom_from and custom_to:
             from_dt = custom_from
@@ -727,7 +727,7 @@ def run_analysis_cycle():
         "TEN_MINUTE", 
         exchange="NSE", 
         specific_date=chosen_date, 
-        days_back=10 
+        days_back=60 
     )
     
     is_live = False
