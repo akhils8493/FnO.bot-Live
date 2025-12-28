@@ -28,7 +28,7 @@ IST = pytz.timezone("Asia/Kolkata")
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-st.set_page_config(page_title="Nifty Angel+Dhan Bot", layout="wide")
+st.set_page_config(page_title="Nifty Angel+Dhan Bot (Live)", layout="wide")
 
 try:
     # --- ANGEL ONE CREDENTIALS ---
@@ -83,7 +83,7 @@ if "stop_bot" not in st.session_state:
 
 # --- SMART CACHE: PREVENTS REDUNDANT API CALLS ---
 if "history_cache" not in st.session_state:
-    st.session_state["history_cache"] = {}  # Stores 60-day static data
+    st.session_state["history_cache"] = {}  # Stores 30-day static data
 
 if "processed_signals" not in st.session_state:
     st.session_state["processed_signals"] = set()  # Remembers processed signals
@@ -340,7 +340,7 @@ def fetch_ltp(api_obj, token, exchange="NSE"):
         pass
     return None
 
-def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=60, custom_from=None, custom_to=None):
+def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=None, days_back=30, custom_from=None, custom_to=None):
     try:
         if custom_from and custom_to:
             from_dt = custom_from
@@ -349,7 +349,6 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
             now_ist = datetime.now(IST)
             target_date = specific_date if specific_date else now_ist.date()
 
-            # Fix for Backtest: Ensure 'to_dt' respects specific_date 15:30
             to_dt = datetime.combine(target_date, dtime(15, 30))
             to_dt = IST.localize(to_dt)
 
@@ -389,10 +388,9 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
 # ---------------------------
 # SMART FETCH (CACHE MANAGER)
 # ---------------------------
-def smart_fetch_nifty_data(api_obj, token, interval, days_back=60):
+def smart_fetch_nifty_data(api_obj, token, interval, days_back=30):
     """
-    Fetches History ONCE, and then appends Today's data live.
-    Prevents fetching 60 days of data every 2 seconds.
+    Fetches History ONCE (30 days), and then appends Today's data live.
     """
     today_date = datetime.now(IST).date()
     cache_key = f"{token}_{interval}"
@@ -499,10 +497,11 @@ def find_precise_event_time(api_obj, token, start_time_10min, threshold_price, c
 
 def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, signal_type, spot_price, trade_date):
     atm = get_atm_strike(spot_price)
-    strikes = [atm + (i * 50) for i in range(-5, 6)]
+    strikes = [atm + (i * 50) for i in range(-4, 5)]
     candidates = []
     
     for strike in strikes:
+        time.sleep(0.35)
         token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
@@ -540,7 +539,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         return True, best["strike"], best["df"], best["token"]
     return False, None, None, None
 
-def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date, is_live_mode=False):
+def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade_date, is_live_mode=True):
     trades = []
     trade_open = False
     trade_entry = {} 
@@ -562,14 +561,11 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
             
             # --- MEMORY CHECK (Smart Skip) ---
             # If we already validated this signal and it failed or was skipped, DON'T check again
-            # We create a unique ID: "Time_Type"
             signal_type = "PE" if df.loc[idx, "above_ema_alert"] else "CE"
             sig_id = f"{curr_time}_{signal_type}"
 
-            # If Live Mode, and we have already processed this old signal, skip it.
             if is_live_mode and (sig_id in st.session_state["processed_signals"]):
                 continue
-
             # --- END MEMORY CHECK ---
 
             # BUY PE
@@ -763,14 +759,16 @@ dhan_master_df = get_dhan_master_df()
 
 with st.sidebar:
     st.header("⚙️ Controls")
-    today_ist = datetime.now(IST).date()
-    mode = st.radio("Select Mode", ["🔙 BACKTEST", "🔴 LIVE MARKET"], index=1)
-    chosen_date = st.date_input("Date", value=today_ist) if mode == "🔙 BACKTEST" else today_ist
-    expiry_str = st.text_input("Expiry", value=get_next_tuesday(chosen_date))
     
+    # LIVE MODE IS DEFAULT NOW
+    today_ist = datetime.now(IST).date()
+    chosen_date = today_ist
+    
+    # Using next Tuesday as default expiry
+    expiry_str = st.text_input("Expiry", value=get_next_tuesday(chosen_date))
     st.caption(f"🗓️ Using Expiry: **{expiry_str}**")
     
-    refresh_rate = st.slider("Auto-Refresh (Sec)", 5, 60, 5)
+    refresh_rate = st.slider("UI Refresh Rate (Sec)", 5, 60, 10)
 
     st.divider()
     if st.button("Send Test Alert"):
@@ -778,31 +776,30 @@ with st.sidebar:
             st.success("Sent!")
         else: st.error("Failed")
         
-    # --- CONTROL BUTTONS FOR LIVE MODE ---
-    if mode == "🔴 LIVE MARKET":
-        st.divider()
-        st.subheader("Bot State")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("⏹ STOP"):
-                st.session_state["stop_bot"] = True
-        with col2:
-            if st.button("▶️ START"):
-                st.session_state["stop_bot"] = False
-                
-        if st.session_state["stop_bot"]:
-            st.error("BOT STOPPED")
-        else:
-            st.success("BOT RUNNING")
+    # --- CONTROL BUTTONS ---
+    st.divider()
+    st.subheader("Bot State")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⏹ STOP"):
+            st.session_state["stop_bot"] = True
+    with col2:
+        if st.button("▶️ START"):
+            st.session_state["stop_bot"] = False
+            
+    if st.session_state["stop_bot"]:
+        st.error("BOT STOPPED")
+    else:
+        st.success("BOT RUNNING")
 
 
-st.title("🚀 Nifty Auto-Bot (Smart Cache + Dhan Exec)")
+st.title("🚀 Nifty Auto-Bot (Live Only)")
+st.subheader(f"📅 {datetime.now(IST).strftime('%A, %d %B %Y')}") # Date Display
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
 order_table = st.empty() 
-analyzer_section = st.empty()
 
 # ---------------------------
 # CORE STATE CHECK & RUN LOGIC
@@ -822,34 +819,19 @@ def is_recent(timestamp_str, limit_minutes=15):
     except:
         return True 
 
-def run_analysis_cycle():
-    # --- 1. DATA FETCHING LOGIC (SPLIT BY MODE) ---
-    if mode == "🔙 BACKTEST":
-        # SIMPLE FETCH: Strict fetch for the chosen date history
-        df_long = fetch_candle_data(
-            api, 
-            NIFTY_TOKEN, 
-            "TEN_MINUTE", 
-            exchange="NSE", 
-            specific_date=chosen_date, # Crucial: Use the user-selected date
-            days_back=60 
-        )
-        is_live = False
-    else:
-        # LIVE FETCH: Uses Smart Cache to save API calls
-        df_long = smart_fetch_nifty_data(
-            api, 
-            NIFTY_TOKEN, 
-            "TEN_MINUTE", 
-            days_back=60 
-        )
-        # Inject real-time price
-        df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
-        is_live = True
-
+def run_analysis_cycle(render_ui=True):
+    # --- 1. DATA FETCHING (LIVE) ---
+    df_long = smart_fetch_nifty_data(
+        api, 
+        NIFTY_TOKEN, 
+        "TEN_MINUTE", 
+        days_back=30 
+    )
+    df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
+    
     if df_long.empty:
-        main_chart.warning(f"⚠️ No Data Found. (Mode: {mode})")
-        return
+        if render_ui: main_chart.warning(f"⚠️ No Data Found.")
+        return 0
         
     df_long = add_custom_ema(df_long)
     
@@ -858,16 +840,16 @@ def run_analysis_cycle():
     df_today = df_today.reset_index(drop=True)
 
     if df_today.empty:
-        main_chart.warning(f"⚠️ No Candle Data for {chosen_date}. (Check if it's a holiday or weekend)")
-        return
+        if render_ui: main_chart.warning(f"⚠️ No Candle Data for {chosen_date}.")
+        return 0
     
     # --- RUN STRATEGY ---
-    current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
+    current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=True)
     
-    # --- SAFETY CHECK: State Continuity (Only for Live) ---
+    # --- SAFETY CHECK: State Continuity ---
     should_update = True
     
-    if is_live and st.session_state["session_trades"]:
+    if st.session_state["session_trades"]:
         last_saved_trade = st.session_state["session_trades"][-1]
         
         if "OPEN" in last_saved_trade["result"]:
@@ -879,158 +861,133 @@ def run_analysis_cycle():
             
             if not found_in_new:
                 should_update = False
-                st.toast("⚠️ Data Glitch Detected! Open Trade vanished. Keeping old state.", icon="🛡️")
+                if render_ui: st.toast("⚠️ Data Glitch Detected! Open Trade vanished.", icon="🛡️")
 
-    if should_update or not is_live:
+    if should_update:
         st.session_state["session_trades"] = current_trades
     
     trades_to_display = st.session_state["session_trades"]
 
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {chosen_date}", is_option_chart=False), use_container_width=True)
-    
-    if trades_to_display:
-        df_display = pd.DataFrame(trades_to_display)
-        cols = ["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]
-        existing_cols = [c for c in cols if c in df_display.columns]
-        
-        styler = df_display[existing_cols].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
-        main_table.dataframe(styler, use_container_width=True)
-        
-        if mode == "🔙 BACKTEST":
-            with analyzer_section.container():
-                st.divider()
-                st.subheader("🔎 Trade Analysis (All Trades)")
-                for t_data in trades_to_display:
-                    strike = t_data['Best Strike']
-                    op_type = "CE" if "CE" in t_data['Nature'] else "PE"
-                    st.write(f"### Trade #{t_data['TradeID']} - {t_data['Nature']} ({strike})")
+    # --- ORDER EXECUTION LOGIC (MUST RUN EVERY SECOND) ---
+    for trade in trades_to_display:
+        tid = trade["TradeID"]
+        current_result = trade["result"]
+        signal_time_str = trade["Signal Time"]
+        last_known_state = st.session_state["trade_state"].get(tid, None)
+        is_fresh_event = is_recent(signal_time_str, limit_minutes=15)
+
+        if last_known_state is None:
+            if is_fresh_event:
+                if render_ui: st.toast(f"New Entry: #{tid}", icon="🚀")
+                
+                # --- PLACE ORDER LOGIC (DUAL) ---
+                angel_token = trade.get("token")
+                
+                if angel_token:
+                    symbol_name = get_symbol_from_token(master_df, angel_token)
                     
-                    token = get_angel_token(master_df, "NIFTY", expiry_str, strike, op_type)
-                    if token:
-                        # Fetch Option Chart for the specific backtest date
-                        df_opt_chart = fetch_candle_data(
-                            api, token, "TEN_MINUTE", exchange="NFO", 
-                            specific_date=chosen_date, # Fix: Pass chosen_date here too
-                            days_back=5
-                        )
-                        if not df_opt_chart.empty:
-                            df_opt_chart = add_custom_ema(df_opt_chart)
-                            df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
-                            lines = {"entry": t_data['entry_price'], "sl": t_data['SL'], "target": t_data['target']}
-                            fig_opt = plot_strategy_with_trades(df_opt_today_chart, trades=[t_data], title=f"OPTION: {strike} {op_type} ({t_data['result']})", extra_lines=lines, is_option_chart=True)
-                            st.plotly_chart(fig_opt, use_container_width=True)
-                        else: st.error(f"No Data for {strike} {op_type}")
-                    st.divider()
-
-        if mode == "🔴 LIVE MARKET":
-            analyzer_section.empty()
-            
-            # --- 1. PROCESS ALERTS & ORDERS ---
-            for trade in trades_to_display:
-                tid = trade["TradeID"]
-                current_result = trade["result"]
-                signal_time_str = trade["Signal Time"]
-                last_known_state = st.session_state["trade_state"].get(tid, None)
-                is_fresh_event = is_recent(signal_time_str, limit_minutes=15)
-
-                if last_known_state is None:
-                    if is_fresh_event:
-                        st.toast(f"New Entry: #{tid}", icon="🚀")
+                    if symbol_name:
+                        # 1. Place Angel Order
+                        angel_order_id = place_angel_order(api, angel_token, symbol_name, trade["entry_price"])
                         
-                        # --- PLACE ORDER LOGIC (DUAL) ---
-                        angel_token = trade.get("token")
+                        # 2. Place Dhan Order
+                        dhan_id = get_dhan_security_id(dhan_master_df, expiry_str, trade["Best Strike"], trade["type"])
+                        dhan_order_id = "FAILED"
                         
-                        if angel_token:
-                            symbol_name = get_symbol_from_token(master_df, angel_token)
+                        if dhan_id:
+                            dhan_resp = place_dhan_order(dhan_api, dhan_id, trade["entry_price"])
+                            if dhan_resp:
+                                dhan_order_id = dhan_resp
+                                if render_ui: st.toast(f"Dhan Order Placed! ID: {dhan_resp}", icon="⚡")
+                        elif render_ui:
+                             st.error("Could not find Dhan Security ID for this strike")
+
+                        # 3. Logging
+                        if angel_order_id or dhan_order_id != "FAILED":
+                            combined_id = f"A:{angel_order_id} | D:{dhan_order_id}"
+                            if render_ui: st.toast(f"Orders Executed", icon="✅")
                             
-                            if symbol_name:
-                                # 1. Place Angel Order
-                                angel_order_id = place_angel_order(api, angel_token, symbol_name, trade["entry_price"])
-                                
-                                # 2. Place Dhan Order
-                                dhan_id = get_dhan_security_id(dhan_master_df, expiry_str, trade["Best Strike"], trade["type"])
-                                dhan_order_id = "FAILED"
-                                
-                                if dhan_id:
-                                    dhan_resp = place_dhan_order(dhan_api, dhan_id, trade["entry_price"])
-                                    if dhan_resp:
-                                        dhan_order_id = dhan_resp
-                                        st.toast(f"Dhan Order Placed! ID: {dhan_resp}", icon="⚡")
-                                else:
-                                    st.error("Could not find Dhan Security ID for this strike")
+                            order_details = {
+                                "Time": datetime.now(IST).strftime('%H:%M:%S'),
+                                "Symbol": symbol_name,
+                                "Type": "BUY (LIMIT)",
+                                "Qty": ORDER_QTY,
+                                "Price": trade["entry_price"],
+                                "Total Amount": ORDER_QTY * trade["entry_price"],
+                                "OrderID": combined_id
+                            }
+                            st.session_state["order_book"].append(order_details)
+                            send_email_notification(order_details, alert_type="ORDER")
+                    elif render_ui:
+                        st.error("Symbol Name not found for Token!")
+                
+                # Send STRATEGY Email
+                if send_email_notification(trade, alert_type="ENTRY"):
+                    st.session_state["trade_state"][tid] = current_result
+            else:
+                st.session_state["trade_state"][tid] = current_result
+                
+        elif last_known_state != current_result:
+            if "OPEN" in last_known_state and ("TARGET" in current_result or "SL" in current_result):
+                exit_time_str = trade.get("Target Time", "-") if "TARGET" in current_result else trade.get("SL Time", "-")
+                is_fresh_exit = is_recent(exit_time_str, limit_minutes=15) if exit_time_str != "-" else True
 
-                                # 3. Logging
-                                if angel_order_id or dhan_order_id != "FAILED":
-                                    combined_id = f"A:{angel_order_id} | D:{dhan_order_id}"
-                                    st.toast(f"Orders Executed", icon="✅")
-                                    
-                                    order_details = {
-                                        "Time": datetime.now(IST).strftime('%H:%M:%S'),
-                                        "Symbol": symbol_name,
-                                        "Type": "BUY (LIMIT)",
-                                        "Qty": ORDER_QTY,
-                                        "Price": trade["entry_price"],
-                                        "Total Amount": ORDER_QTY * trade["entry_price"],
-                                        "OrderID": combined_id
-                                    }
-                                    st.session_state["order_book"].append(order_details)
-                                    send_email_notification(order_details, alert_type="ORDER")
-                            else:
-                                st.error("Symbol Name not found for Token!")
-                        
-                        # Send STRATEGY Email
-                        if send_email_notification(trade, alert_type="ENTRY"):
-                            st.session_state["trade_state"][tid] = current_result
-                    else:
+                if is_fresh_exit:
+                    if render_ui: st.toast(f"Exit: #{tid} ({current_result})", icon="🔔")
+                    if send_email_notification(trade, alert_type="EXIT"):
                         st.session_state["trade_state"][tid] = current_result
-                        
-                elif last_known_state != current_result:
-                    if "OPEN" in last_known_state and ("TARGET" in current_result or "SL" in current_result):
-                        exit_time_str = trade.get("Target Time", "-") if "TARGET" in current_result else trade.get("SL Time", "-")
-                        is_fresh_exit = is_recent(exit_time_str, limit_minutes=15) if exit_time_str != "-" else True
+                else:
+                    st.session_state["trade_state"][tid] = current_result
 
-                        if is_fresh_exit:
-                            st.toast(f"Exit: #{tid} ({current_result})", icon="🔔")
-                            if send_email_notification(trade, alert_type="EXIT"):
-                                st.session_state["trade_state"][tid] = current_result
-                        else:
-                            st.session_state["trade_state"][tid] = current_result
+    # --- RENDER UI (ONLY IF REQUESTED) ---
+    if render_ui:
+        main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {chosen_date}", is_option_chart=False), use_container_width=True)
+        
+        if trades_to_display:
+            df_display = pd.DataFrame(trades_to_display)
+            cols = ["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]
+            existing_cols = [c for c in cols if c in df_display.columns]
             
-            # --- 2. DISPLAY ORDER BOOK ---
+            styler = df_display[existing_cols].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
+            main_table.dataframe(styler, use_container_width=True)
+            
+            # --- DISPLAY ORDER BOOK ---
             if st.session_state["order_book"]:
                 st.write("### 📝 Order Book (Live Executions)")
                 st.dataframe(pd.DataFrame(st.session_state["order_book"]), use_container_width=True)
-                
-    else:
-        if st.session_state["session_trades"]:
-            df_display = pd.DataFrame(st.session_state["session_trades"])
-            cols = ["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]
-            existing_cols = [c for c in cols if c in df_display.columns]
-            styler = df_display[existing_cols].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
-            main_table.dataframe(styler, use_container_width=True)
-            main_table.info("⚠️ Showing last known data (Scan failed or returned empty).")
-        else:
-            main_table.info("⏳ Waiting for Signals...")
         
-    top_status.caption(f"Last Scan: {datetime.now(IST).strftime('%H:%M:%S')}")
+        top_status.caption(f"Last UI Update: {datetime.now(IST).strftime('%H:%M:%S')}")
+    
+    return len(trades_to_display)
 
 # ----------------------------------
-# EXECUTION LOGIC (AUTO-START)
+# HIGH-SPEED EXECUTION LOGIC
 # ----------------------------------
-if mode == "🔙 BACKTEST":
-    if "backtest_data" not in st.session_state:
-        st.session_state["backtest_data"] = None
 
-    if st.button("Run Backtest"):
-        with st.spinner("Analyzing..."):
-            run_analysis_cycle()
-            st.session_state["backtest_data"] = True
-
-elif mode == "🔴 LIVE MARKET":
-    if not st.session_state["stop_bot"]:
-        # Run the cycle once
-        run_analysis_cycle()
+# LIVE MARKET LOGIC ONLY
+if not st.session_state["stop_bot"]:
+    
+    # 1. Full Run (Update Charts + Logic)
+    initial_trade_count = len(st.session_state["session_trades"])
+    run_analysis_cycle(render_ui=True)
+    
+    # 2. Micro-Loop: Check repeatedly for 'refresh_rate' seconds
+    end_time = time.time() + refresh_rate
+    
+    status_placeholder = st.empty()
+    
+    while time.time() < end_time:
+        remaining = int(end_time - time.time())
+        status_placeholder.caption(f"⚡ Monitoring... Next UI Update in {remaining}s")
         
-        # Wait, then restart script
-        time.sleep(refresh_rate)
-        st.rerun()
+        # FAST SCAN: Logic only, NO charts (Fast!)
+        current_trade_count = run_analysis_cycle(render_ui=False)
+        
+        # If a new trade appears, BREAK the wait and update UI immediately!
+        if current_trade_count > initial_trade_count:
+            status_placeholder.warning("🚀 New Signal Detected! Updating UI...")
+            break
+            
+        time.sleep(1) # 1-Second Precision Tick
+        
+    st.rerun()
