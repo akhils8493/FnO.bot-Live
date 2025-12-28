@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta, time as dtime
 from SmartApi import SmartConnect
-from dhanhq import dhanhq  # NEW IMPORT
+from dhanhq import dhanhq  
 import requests
 import os
 import pyotp
@@ -28,28 +28,37 @@ IST = pytz.timezone("Asia/Kolkata")
 # ---------------------------
 # CONFIGURATION
 # ---------------------------
-# --- ANGEL ONE CREDENTIALS ---
-API_KEY = "WM6i3ikL"
-CLIENT_ID = "AABY364105"
-PIN = "6954"
-TOTP_TOKEN = "D5PMGU3B674K4YFIQNE7CKDUSU"
+st.set_page_config(page_title="Nifty Angel+Dhan Bot", layout="wide")
+
+try:
+    # --- ANGEL ONE CREDENTIALS ---
+    API_KEY = st.secrets["ANGEL_API_KEY"]
+    CLIENT_ID = st.secrets["ANGEL_CLIENT_ID"]
+    PIN = st.secrets["ANGEL_PIN"]
+    TOTP_TOKEN = st.secrets["ANGEL_TOTP_TOKEN"]
+    
+    # --- DHAN CREDENTIALS ---
+    DHAN_CLIENT_ID = st.secrets["DHAN_CLIENT_ID"]
+    DHAN_ACCESS_TOKEN = st.secrets["DHAN_ACCESS_TOKEN"]
+
+    # --- EMAIL CREDENTIALS ---
+    GMAIL_USER = st.secrets["GMAIL_USER"]
+    GMAIL_PASSWORD = st.secrets["GMAIL_PASSWORD"]
+    
+except FileNotFoundError:
+    st.error("🚨 Secrets file not found! Please create .streamlit/secrets.toml")
+    st.stop()
+except KeyError as e:
+    st.error(f"🚨 Missing key in secrets.toml: {e}")
+    st.stop()
+
+# --- CONSTANTS ---
 NIFTY_TOKEN = "99926000"
-
-# --- DHAN CREDENTIALS (REPLACE THESE) ---
-DHAN_CLIENT_ID = "2512259667"   # e.g., "1100087829"
-DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY2ODI4Mzk5LCJpYXQiOjE3NjY3NDE5OTksInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTAwMDg3ODI5In0.aZYVXCopjUCIXUVQA1rDCig8CMwqyOybtEWlxfJPvWXbGY6ZVxT0YK6mSOBzuOCRmKOQLSqo7jQ4vERStRZkBw"
-
 
 # STRATEGY SETTINGS
 MIN_OPT_PRICE = 142
 MAX_OPT_PRICE = 195
 ORDER_QTY = 75  # Fixed Quantity (1 Lot)
-
-# ---------------------------
-# EMAIL CONFIGURATION
-# ---------------------------
-GMAIL_USER = "akhils8493@gmail.com"
-GMAIL_PASSWORD = "tptr wtof dhkb jtht" 
 
 TO_EMAILS = [
     "akhils8493@gmail.com",
@@ -57,7 +66,27 @@ TO_EMAILS = [
     "kamal.padha99@gmail.com"
 ]
 
-st.set_page_config(page_title="Nifty Angel+Dhan Bot", layout="wide")
+# ---------------------------
+# SESSION STATE INITIALIZATION
+# ---------------------------
+if "trade_state" not in st.session_state:
+    st.session_state["trade_state"] = {}
+
+if "session_trades" not in st.session_state:
+    st.session_state["session_trades"] = []
+
+if "order_book" not in st.session_state:
+    st.session_state["order_book"] = []
+
+if "stop_bot" not in st.session_state:
+    st.session_state["stop_bot"] = False
+
+# --- SMART CACHE: PREVENTS REDUNDANT API CALLS ---
+if "history_cache" not in st.session_state:
+    st.session_state["history_cache"] = {}  # Stores 60-day static data
+
+if "processed_signals" not in st.session_state:
+    st.session_state["processed_signals"] = set()  # Remembers processed signals
 
 # ---------------------------
 # 1. ANGEL ONE LOGIN
@@ -194,9 +223,18 @@ def get_angel_master_df():
 def get_dhan_master_df():
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        # Optimization: Filter immediately to reduce memory
         df = pd.read_csv(url, low_memory=False)
         df.columns = df.columns.str.strip()
-        # Parse date for filtering efficiency
+        
+        # Keep only NIFTY Options to speed up lookups
+        df = df[
+            (df["SEM_EXM_EXCH_ID"] == "NSE") &
+            (df["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
+            (df["SEM_TRADING_SYMBOL"].str.contains("NIFTY")) &
+            (~df["SEM_TRADING_SYMBOL"].str.contains("FINNIFTY"))
+        ]
+        
         df["SEM_EXPIRY_DATE"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors='coerce').dt.date
         return df
     except Exception as e:
@@ -221,17 +259,10 @@ def get_angel_token(df_master, symbol, expiry_date, strike, option_type):
         return None
 
 def get_dhan_security_id(dhan_master, expiry_str, strike, option_type):
-    """
-    Converts Angel format Expiry (e.g. 30DEC2025) to Dhan format and finds Security ID
-    """
     try:
         target_date = datetime.strptime(expiry_str, "%d%b%Y").date()
         
         filtered = dhan_master[
-            (dhan_master["SEM_EXM_EXCH_ID"] == "NSE") &
-            (dhan_master["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
-            (dhan_master["SEM_TRADING_SYMBOL"].str.contains("NIFTY")) &
-            (~dhan_master["SEM_TRADING_SYMBOL"].str.contains("FINNIFTY")) &
             (dhan_master["SEM_EXPIRY_DATE"] == target_date) &
             (dhan_master["SEM_STRIKE_PRICE"] == float(strike)) &
             (dhan_master["SEM_OPTION_TYPE"] == option_type)
@@ -318,11 +349,9 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
             now_ist = datetime.now(IST)
             target_date = specific_date if specific_date else now_ist.date()
 
-            if target_date == now_ist.date():
-                to_dt = now_ist
-            else:
-                to_dt = datetime.combine(target_date, dtime(15, 30))
-                to_dt = IST.localize(to_dt)
+            # Fix for Backtest: Ensure 'to_dt' respects specific_date 15:30
+            to_dt = datetime.combine(target_date, dtime(15, 30))
+            to_dt = IST.localize(to_dt)
 
             from_dt = to_dt - timedelta(days=days_back)
             from_dt = from_dt.replace(hour=9, minute=15)
@@ -356,6 +385,51 @@ def fetch_candle_data(api_obj, token, interval, exchange="NSE", specific_date=No
         return pd.DataFrame()
     except:
         return pd.DataFrame()
+
+# ---------------------------
+# SMART FETCH (CACHE MANAGER)
+# ---------------------------
+def smart_fetch_nifty_data(api_obj, token, interval, days_back=60):
+    """
+    Fetches History ONCE, and then appends Today's data live.
+    Prevents fetching 60 days of data every 2 seconds.
+    """
+    today_date = datetime.now(IST).date()
+    cache_key = f"{token}_{interval}"
+    
+    # 1. LOAD HISTORY (Only runs once per session)
+    if cache_key not in st.session_state["history_cache"]:
+        to_date_history = datetime.combine(today_date - timedelta(days=1), dtime(15, 30))
+        to_date_history = IST.localize(to_date_history)
+        from_date = to_date_history - timedelta(days=days_back)
+        
+        df_hist = fetch_candle_data(
+            api_obj, token, interval, exchange="NSE", 
+            custom_from=from_date, custom_to=to_date_history
+        )
+        st.session_state["history_cache"][cache_key] = df_hist
+
+    # 2. FETCH TODAY'S LIVE DATA
+    today_start = datetime.combine(today_date, dtime(9, 15))
+    today_start = IST.localize(today_start)
+    now_time = datetime.now(IST)
+    
+    df_today = fetch_candle_data(
+        api_obj, token, interval, exchange="NSE",
+        custom_from=today_start, custom_to=now_time
+    )
+
+    # 3. MERGE THEM
+    df_history = st.session_state["history_cache"][cache_key]
+    
+    if df_today.empty:
+        full_df = df_history
+    else:
+        full_df = pd.concat([df_history, df_today], ignore_index=True)
+        # Drop duplicates based on datetime to ensure clean join
+        full_df = full_df.drop_duplicates(subset=['datetime'], keep='last').reset_index(drop=True)
+        
+    return full_df
 
 def inject_live_ltp(df, api_obj, token, exchange="NSE"):
     if df.empty: return df
@@ -432,6 +506,7 @@ def validate_signal_with_options(api_obj, master_df, expiry_date, signal_time, s
         token = get_angel_token(master_df, "NIFTY", expiry_date, strike, signal_type)
         if not token: continue
             
+        # Optimization: Fetch a smaller window for validation
         df_opt = fetch_candle_data(api_obj, token, "TEN_MINUTE", exchange="NFO", specific_date=trade_date, days_back=5)
         
         if trade_date == datetime.now(IST).date():
@@ -484,6 +559,19 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
         is_current_live_candle = is_live_mode and (entry_idx == len(df) - 1)
 
         if not trade_open and df.loc[idx, "alert_candle"]:
+            
+            # --- MEMORY CHECK (Smart Skip) ---
+            # If we already validated this signal and it failed or was skipped, DON'T check again
+            # We create a unique ID: "Time_Type"
+            signal_type = "PE" if df.loc[idx, "above_ema_alert"] else "CE"
+            sig_id = f"{curr_time}_{signal_type}"
+
+            # If Live Mode, and we have already processed this old signal, skip it.
+            if is_live_mode and (sig_id in st.session_state["processed_signals"]):
+                continue
+
+            # --- END MEMORY CHECK ---
+
             # BUY PE
             if df.loc[idx, "above_ema_alert"]:
                 if last_trade_type != "PE":
@@ -492,6 +580,9 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                         is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
                             api_obj, master_df, expiry_date, curr_time, "PE", df.loc[idx, "open"], trade_date)
                         
+                        # Mark signal as processed only in LIVE mode
+                        if is_live_mode: st.session_state["processed_signals"].add(sig_id)
+
                         if is_valid:
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
                             opt_alert_row = opt_df.iloc[opt_alert_idx]
@@ -538,6 +629,8 @@ def sequential_trades_with_validation(df, api_obj, master_df, expiry_date, trade
                         
                         is_valid, best_strike, opt_df, opt_token = validate_signal_with_options(
                             api_obj, master_df, expiry_date, curr_time, "CE", df.loc[idx, "open"], trade_date)
+                        
+                        if is_live_mode: st.session_state["processed_signals"].add(sig_id)
                         
                         if is_valid:
                             opt_alert_idx = opt_df[opt_df["datetime"] == curr_time].index[0]
@@ -656,7 +749,7 @@ def plot_strategy_with_trades(df, trades=None, title="Chart", extra_lines=None, 
 # MAIN APP
 # ---------------------------
 api = angel_login()
-dhan_api = dhan_login() # DHAN Login
+dhan_api = dhan_login() 
 
 if not api:
     st.error("Angel One Login Failed. Stop.")
@@ -677,30 +770,39 @@ with st.sidebar:
     
     st.caption(f"🗓️ Using Expiry: **{expiry_str}**")
     
-    refresh_rate = st.slider("Auto-Refresh (Sec)", 1, 60, 2)
+    refresh_rate = st.slider("Auto-Refresh (Sec)", 5, 60, 5)
 
     st.divider()
     if st.button("Send Test Alert"):
         if send_email_notification({"Nature": "TEST - BUY CE", "Best Strike": 24500, "Signal Time": datetime.now(IST).strftime('%H:%M:%S'), "entry_price": 100, "target": 120, "SL": 80, "result": "TEST"}):
             st.success("Sent!")
         else: st.error("Failed")
+        
+    # --- CONTROL BUTTONS FOR LIVE MODE ---
+    if mode == "🔴 LIVE MARKET":
+        st.divider()
+        st.subheader("Bot State")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("⏹ STOP"):
+                st.session_state["stop_bot"] = True
+        with col2:
+            if st.button("▶️ START"):
+                st.session_state["stop_bot"] = False
+                
+        if st.session_state["stop_bot"]:
+            st.error("BOT STOPPED")
+        else:
+            st.success("BOT RUNNING")
 
-st.title("🚀 Nifty Auto-Bot (Angel Data + Dhan Exec)")
+
+st.title("🚀 Nifty Auto-Bot (Smart Cache + Dhan Exec)")
 top_status = st.empty() 
 main_chart = st.empty() 
 main_table = st.empty() 
 order_table = st.empty() 
 analyzer_section = st.empty()
-
-# --- INITIALIZE SESSION STATE ---
-if "trade_state" not in st.session_state:
-    st.session_state["trade_state"] = {}
-
-if "session_trades" not in st.session_state:
-    st.session_state["session_trades"] = []
-
-if "order_book" not in st.session_state:
-    st.session_state["order_book"] = []
 
 # ---------------------------
 # CORE STATE CHECK & RUN LOGIC
@@ -721,40 +823,51 @@ def is_recent(timestamp_str, limit_minutes=15):
         return True 
 
 def run_analysis_cycle():
-    df_long = fetch_candle_data(
-        api, 
-        NIFTY_TOKEN, 
-        "TEN_MINUTE", 
-        exchange="NSE", 
-        specific_date=chosen_date, 
-        days_back=60 
-    )
-    
-    is_live = False
-    
-    if mode == "🔴 LIVE MARKET":
+    # --- 1. DATA FETCHING LOGIC (SPLIT BY MODE) ---
+    if mode == "🔙 BACKTEST":
+        # SIMPLE FETCH: Strict fetch for the chosen date history
+        df_long = fetch_candle_data(
+            api, 
+            NIFTY_TOKEN, 
+            "TEN_MINUTE", 
+            exchange="NSE", 
+            specific_date=chosen_date, # Crucial: Use the user-selected date
+            days_back=60 
+        )
+        is_live = False
+    else:
+        # LIVE FETCH: Uses Smart Cache to save API calls
+        df_long = smart_fetch_nifty_data(
+            api, 
+            NIFTY_TOKEN, 
+            "TEN_MINUTE", 
+            days_back=60 
+        )
+        # Inject real-time price
         df_long = inject_live_ltp(df_long, api, NIFTY_TOKEN, exchange="NSE")
         is_live = True
 
     if df_long.empty:
-        main_chart.warning(f"⚠️ No Data. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
+        main_chart.warning(f"⚠️ No Data Found. (Mode: {mode})")
         return
         
     df_long = add_custom_ema(df_long)
     
+    # --- FILTER FOR THE SPECIFIC DAY ---
     df_today = df_long[df_long['datetime'].dt.date == chosen_date].copy()
     df_today = df_today.reset_index(drop=True)
 
     if df_today.empty:
-        main_chart.warning(f"⚠️ No Data for Today. Time: {datetime.now(IST).strftime('%H:%M:%S')}")
+        main_chart.warning(f"⚠️ No Candle Data for {chosen_date}. (Check if it's a holiday or weekend)")
         return
     
+    # --- RUN STRATEGY ---
     current_trades = sequential_trades_with_validation(df_today, api, master_df, expiry_str, chosen_date, is_live_mode=is_live)
     
-    # --- SAFETY CHECK: State Continuity ---
+    # --- SAFETY CHECK: State Continuity (Only for Live) ---
     should_update = True
     
-    if st.session_state["session_trades"]:
+    if is_live and st.session_state["session_trades"]:
         last_saved_trade = st.session_state["session_trades"][-1]
         
         if "OPEN" in last_saved_trade["result"]:
@@ -767,18 +880,20 @@ def run_analysis_cycle():
             if not found_in_new:
                 should_update = False
                 st.toast("⚠️ Data Glitch Detected! Open Trade vanished. Keeping old state.", icon="🛡️")
-                main_chart.warning(f"⚠️ Data Instability detected at {datetime.now(IST).strftime('%H:%M:%S')}. Ignoring scan.")
 
-    if should_update:
+    if should_update or not is_live:
         st.session_state["session_trades"] = current_trades
     
     trades_to_display = st.session_state["session_trades"]
 
-    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {datetime.now(IST).strftime('%H:%M:%S')}", is_option_chart=False), use_container_width=True)
+    main_chart.plotly_chart(plot_strategy_with_trades(df_today, trades=trades_to_display, title=f"NIFTY - {chosen_date}", is_option_chart=False), use_container_width=True)
     
     if trades_to_display:
         df_display = pd.DataFrame(trades_to_display)
-        styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
+        cols = ["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]
+        existing_cols = [c for c in cols if c in df_display.columns]
+        
+        styler = df_display[existing_cols].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
         main_table.dataframe(styler, use_container_width=True)
         
         if mode == "🔙 BACKTEST":
@@ -792,7 +907,12 @@ def run_analysis_cycle():
                     
                     token = get_angel_token(master_df, "NIFTY", expiry_str, strike, op_type)
                     if token:
-                        df_opt_chart = fetch_candle_data(api, token, "TEN_MINUTE", exchange="NFO", specific_date=chosen_date, days_back=60)
+                        # Fetch Option Chart for the specific backtest date
+                        df_opt_chart = fetch_candle_data(
+                            api, token, "TEN_MINUTE", exchange="NFO", 
+                            specific_date=chosen_date, # Fix: Pass chosen_date here too
+                            days_back=5
+                        )
                         if not df_opt_chart.empty:
                             df_opt_chart = add_custom_ema(df_opt_chart)
                             df_opt_today_chart = df_opt_chart[df_opt_chart["datetime"].dt.date == chosen_date].copy()
@@ -884,7 +1004,9 @@ def run_analysis_cycle():
     else:
         if st.session_state["session_trades"]:
             df_display = pd.DataFrame(st.session_state["session_trades"])
-            styler = df_display[["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
+            cols = ["TradeID", "Nature", "Signal Time", "entry_price", "SL", "target", "result", "Best Strike", "SL Time", "Target Time"]
+            existing_cols = [c for c in cols if c in df_display.columns]
+            styler = df_display[existing_cols].style.map(lambda v: 'background-color: #006400' if 'TARGET' in str(v) else ('background-color: #8B0000' if 'SL' in str(v) else 'background-color: #00008B'), subset=['result'])
             main_table.dataframe(styler, use_container_width=True)
             main_table.info("⚠️ Showing last known data (Scan failed or returned empty).")
         else:
@@ -905,33 +1027,10 @@ if mode == "🔙 BACKTEST":
             st.session_state["backtest_data"] = True
 
 elif mode == "🔴 LIVE MARKET":
-    if "stop_bot" not in st.session_state:
-        st.session_state.stop_bot = False
-
-    if st.sidebar.button("⏹ STOP BOT"):
-        st.session_state.stop_bot = True
-    
-    if st.sidebar.button("▶️ RESTART"):
-        st.session_state.stop_bot = False
-
-    if not st.session_state.stop_bot:
-        st.sidebar.success("✅ Bot Running...")
+    if not st.session_state["stop_bot"]:
+        # Run the cycle once
+        run_analysis_cycle()
         
-        now_time = datetime.now(IST).time()
-        market_open = dtime(9, 15) <= now_time <= dtime(15, 30)
-        
-        if market_open:
-            while True:
-                try:
-                    run_analysis_cycle()
-                    time.sleep(refresh_rate)
-                except KeyboardInterrupt:
-                    break
-                except Exception as e:
-                    top_status.error(f"Loop Error: {e}")
-                    time.sleep(10)
-        else:
-            run_analysis_cycle()
-            st.info("Market Closed. Bot is in Sleep Mode.")
-    else:
-        st.warning("Bot Manually Stopped.")
+        # Wait, then restart script
+        time.sleep(refresh_rate)
+        st.rerun()
